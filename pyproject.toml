@@ -33,6 +33,7 @@ classifiers=[
 dependencies=[
     # keep-sorted start
     'absl-py',
+    'aiohttp',
     'alphagenome',
     'anndata',
     'chex',
