@@ -1,0 +1,41 @@
+// Copyright 2026 Google LLC.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package alphagenome_research.protos;
+
+import "alphagenome/protos/dna_model.proto";
+
+option java_multiple_files = true;
+option java_outer_classname = "CalibrationScoresProto";
+option java_package = "com.google.alphagenome.research.protos";
+
+message VariantScorerCalibration {
+  // 2-d array of quantiles for the variant scorer. The first dimension is
+  // over tracks, and the second dimension is over quantiles. Data is stored in
+  // row-major order.
+  repeated float quantiles = 1;
+
+  // 1-d array of quantile probabilities for the variant scorer.
+  repeated float quantile_probabilities = 2;
+
+  // Tracks metadata used for validation.
+  google.gdm.gdmscience.alphagenome.v1main.TracksMetadata tracks_metadata = 3;
+}
+
+message CalibrationScores {
+  // Mapping from variant scorer to calibration scores.
+  map<string, VariantScorerCalibration> scorer_to_calibration = 1;
+}

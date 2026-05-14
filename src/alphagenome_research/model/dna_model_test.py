@@ -27,6 +27,8 @@ from alphagenome_research.io import fasta
 from alphagenome_research.io import splicing
 from alphagenome_research.model import dna_model
 from alphagenome_research.model.metadata import metadata
+from alphagenome_research.model.variant_scoring.calibration import calibration
+from alphagenome_research.protos import calibration_scores_pb2
 import chex
 import huggingface_hub
 import jax
@@ -39,6 +41,8 @@ import pandas as pd
 
 
 MOCK_SHAPES = ({}, {})
+
+_SPLICE_JUNCTION_PADDING = 2
 
 
 def _create_mock_gtf() -> pd.DataFrame:
@@ -123,9 +127,12 @@ class DnaModelTest(parameterized.TestCase):
         splice_junctions=pd.DataFrame({
             'name': (
                 [f'tissue_{i}' for i in range(self._num_tissues)]
-                + ['Padding'] * 2
+                + ['Padding'] * _SPLICE_JUNCTION_PADDING
             ),
-            'ontology_curie': ['UBERON:0000001'] * (self._num_tissues + 2),
+            'ontology_curie': (
+                ['UBERON:0000001']
+                * (self._num_tissues + _SPLICE_JUNCTION_PADDING)
+            ),
         }),
         chip_tf=pd.DataFrame({
             'name': ['chip_1', 'chip_2'],
@@ -448,7 +455,8 @@ class DnaModelTest(parameterized.TestCase):
       self.assertIsNotNone(output)
       chex.assert_shape(output.values, expected_shape)
 
-  def test_score_variant(self):
+  @parameterized.product(with_calibration=[True, False])
+  def test_score_variant(self, with_calibration: bool):
     mock_fasta_extractor = mock.create_autospec(fasta.FastaExtractor)
     mock_fasta_extractor.extract.side_effect = lambda x: 'A' * x.width
 
@@ -459,24 +467,10 @@ class DnaModelTest(parameterized.TestCase):
         (x.width, 5), dtype=bool
     )
 
-    model = dna_model.AlphaGenomeModel(
-        params={},
-        state={},
-        apply_fn=self._mock_model,
-        junctions_apply_fn=self._mock_model_junctions,
-        metadata={dna_model.Organism.HOMO_SAPIENS: self._metadata},
-        fasta_extractors={
-            dna_model.Organism.HOMO_SAPIENS: mock_fasta_extractor
-        },
-        gtfs={dna_model.Organism.HOMO_SAPIENS: _create_mock_gtf()},
-        pas_gtfs={dna_model.Organism.HOMO_SAPIENS: _create_polya_df_gtf()},
-        device=jax.local_devices()[0],
-        splice_site_extractors={
-            dna_model.Organism.HOMO_SAPIENS: mock_splice_sites_extractor
-        },
+    mock_calibration_scorer = mock.create_autospec(
+        calibration.CalibrationScorer, instance=True
     )
-    interval = genome.Interval.from_str('chr1:0-2048:.')
-    variant = genome.Variant.from_str('chr1:1024:A>C')
+
     scorers = [
         variant_scorers.CenterMaskScorer(
             aggregation_type=variant_scorers.AggregationType.DIFF_MEAN,
@@ -494,33 +488,79 @@ class DnaModelTest(parameterized.TestCase):
         ),
         variant_scorers.SpliceJunctionScorer(),
     ]
+    expected_shapes = {
+        scorers[0].name: (1, len(self._metadata.atac)),
+        scorers[1].name: (1, len(self._metadata.chip_tf)),
+        scorers[2].name: (1, len(self._metadata.contact_maps)),
+        scorers[3].name: (2, len(self._metadata.atac)),
+        scorers[4].name: (
+            0,
+            len(self._metadata.splice_junctions) - _SPLICE_JUNCTION_PADDING,
+        ),
+    }
+    self.assertLen(scorers, len(expected_shapes))
+
+    calibration_scorers = {}
+    if with_calibration:
+      mock_calibration_scorer.has_variant_scorer.side_effect = (
+          lambda scorer_name: scorer_name in expected_shapes
+      )
+      mock_calibration_scorer.quantile_scores.side_effect = (
+          lambda scorer_name, *_: np.zeros(expected_shapes[scorer_name])
+      )
+      calibration_scorers[dna_model.Organism.HOMO_SAPIENS] = (
+          mock_calibration_scorer
+      )
+
+    model = dna_model.AlphaGenomeModel(
+        params={},
+        state={},
+        apply_fn=self._mock_model,
+        junctions_apply_fn=self._mock_model_junctions,
+        metadata={dna_model.Organism.HOMO_SAPIENS: self._metadata},
+        fasta_extractors={
+            dna_model.Organism.HOMO_SAPIENS: mock_fasta_extractor
+        },
+        gtfs={dna_model.Organism.HOMO_SAPIENS: _create_mock_gtf()},
+        pas_gtfs={dna_model.Organism.HOMO_SAPIENS: _create_polya_df_gtf()},
+        device=jax.local_devices()[0],
+        splice_site_extractors={
+            dna_model.Organism.HOMO_SAPIENS: mock_splice_sites_extractor
+        },
+        calibration_scorers=calibration_scorers,
+    )
+    interval = genome.Interval.from_str('chr1:0-2048:.')
+    variant = genome.Variant.from_str('chr1:1024:A>C')
     output = model.score_variant(interval, variant, variant_scorers=scorers)
     self.assertLen(output, len(scorers))
     for result, scorer in zip(output, scorers):
+      chex.assert_shape(result.X, expected_shapes[scorer.name])
       self.assertEqual(result.uns['interval'], interval)
       self.assertEqual(result.uns['variant'], variant)
       self.assertEqual(result.uns['variant_scorer'], scorer)
+      if with_calibration:
+        self.assertIn('quantiles', result.layers)
 
     df = variant_scorers.tidy_scores(output)
-    self.assertCountEqual(
-        [
-            'variant_id',
-            'scored_interval',
-            'gene_id',
-            'gene_name',
-            'gene_type',
-            'gene_strand',
-            'junction_Start',
-            'junction_End',
-            'output_type',
-            'variant_scorer',
-            'track_name',
-            'track_strand',
-            'ontology_curie',
-            'raw_score',
-        ],
-        df.columns,
-    )
+    expected_columns = [
+        'variant_id',
+        'scored_interval',
+        'gene_id',
+        'gene_name',
+        'gene_type',
+        'gene_strand',
+        'junction_Start',
+        'junction_End',
+        'output_type',
+        'variant_scorer',
+        'track_name',
+        'track_strand',
+        'ontology_curie',
+        'raw_score',
+    ]
+    if with_calibration:
+      expected_columns.append('quantile_score')
+    self.assertCountEqual(expected_columns, df.columns)
 
   def test_missing_gtf_raises_scorer_missing_error(self):
     mock_fasta_extractor = mock.create_autospec(fasta.FastaExtractor)
@@ -707,6 +747,11 @@ class DnaModelTest(parameterized.TestCase):
     splice_ends.to_feather(splice_ends_path)
     checkpointer.wait_until_finished()
 
+    calibration_file = self.create_tempfile()
+    calibration_file.write_bytes(
+        calibration_scores_pb2.CalibrationScores().SerializeToString()
+    )
+
     model = dna_model.create(
         checkpoint_dir,
         organism_settings={
@@ -717,6 +762,7 @@ class DnaModelTest(parameterized.TestCase):
                 splice_site_starts_feather_path=splice_starts_path,
                 splice_site_ends_feather_path=splice_ends_path,
                 metadata=model_metadata,
+                calibration_path=calibration_file.full_path,
             )
         },
         device=jax.local_devices()[0],

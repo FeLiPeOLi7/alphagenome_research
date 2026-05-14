@@ -48,6 +48,7 @@ from alphagenome_research.model.variant_scoring import gene_mask_extractor
 from alphagenome_research.model.variant_scoring import polyadenylation
 from alphagenome_research.model.variant_scoring import splice_junction
 from alphagenome_research.model.variant_scoring import variant_scoring
+from alphagenome_research.model.variant_scoring.calibration import calibration
 import anndata
 import chex
 import haiku as hk
@@ -381,6 +382,9 @@ class AlphaGenomeModel(dna_model.DnaModel):
       pas_gtfs: Mapping[dna_model.Organism, pd.DataFrame] | None = None,
       num_splice_sites: int = 512,
       splice_site_threshold: float = 0.1,
+      calibration_scorers: (
+          Mapping[dna_model.Organism, calibration.CalibrationScorer] | None
+      ) = None,
       device: jax.Device | None = None,
   ):
     """Initializes the AlphaGenomeModel.
@@ -407,6 +411,8 @@ class AlphaGenomeModel(dna_model.DnaModel):
       num_splice_sites: The maximum number of splice sites that are extracted
         from the splice site classification predictions.
       splice_site_threshold: The threshold to use for splice site prediction.
+      calibration_scorers: Optional mapping of organism to CalibrationScorer. If
+        not provided, calibration will not be available.
       device: Optional device to use for model prediction. If None, the first
         local device will be used.
     """
@@ -425,6 +431,7 @@ class AlphaGenomeModel(dna_model.DnaModel):
     self._one_hot_encoder = one_hot_encoder.DNAOneHotEncoder()
     self._fasta_extractors = fasta_extractors or {}
     self._splice_site_extractors = splice_site_extractors or {}
+    self._calibration_scorers = calibration_scorers or {}
 
     self._predict = jax.jit(
         functools.partial(_predict, apply_fn=apply_fn),
@@ -889,6 +896,7 @@ class AlphaGenomeModel(dna_model.DnaModel):
             variant_scoring.IndelMask.from_variant(variant, interval),
         ),
     )
+    calibration_scorer = self._calibration_scorers.get(organism)
 
     with self._device_context as device, jax.transfer_guard('disallow'):
 
@@ -951,6 +959,15 @@ class AlphaGenomeModel(dna_model.DnaModel):
         result.uns['interval'] = interval
         result.uns['variant'] = variant
         result.uns['variant_scorer'] = scorer_settings
+
+        if (
+            calibration_scorer is not None
+            and calibration_scorer.has_variant_scorer(scorer_settings.name)
+        ):
+          result.layers['quantiles'] = calibration_scorer.quantile_scores(
+              scorer_settings.name, result
+          )
+
         results.append(result)
 
     return results
@@ -1138,6 +1155,10 @@ class OrganismSettings:
   splice_site_starts_feather_path: str | os.PathLike[str] | None = None
   splice_site_ends_feather_path: str | os.PathLike[str] | None = None
 
+  # Optional path to variant score calibration. If None, variant scores will not
+  # be calibrated.
+  calibration_path: str | os.PathLike[str] | None = None
+
 
 def default_organism_settings() -> (
     Mapping[dna_model.Organism, OrganismSettings]
@@ -1165,6 +1186,7 @@ def default_organism_settings() -> (
               'https://storage.googleapis.com/alphagenome/reference/gencode/'
               'hg38/gencode.v46.splice_sites_ends.feather'
           ),
+          calibration_path='gs:///alphagenome/data/hg38/calibration_scores.pb',
       ),
       dna_model.Organism.MUS_MUSCULUS: OrganismSettings(
           fasta_path=(
@@ -1184,6 +1206,7 @@ def default_organism_settings() -> (
               'https://storage.googleapis.com/alphagenome/reference/gencode/'
               'mm10/gencode.vM23.splice_sites_ends.feather'
           ),
+          calibration_path=None,
       ),
   }
 
@@ -1292,6 +1315,7 @@ def create(
   metadata = {}
   fasta_extractors = {}
   splice_site_extractors = {}
+  calibration_scorers = {}
   gtfs = {}
   pas_gtfs = {}
   validate_checkpoint = True
@@ -1319,6 +1343,10 @@ def create(
                   settings.splice_site_ends_feather_path
               ),
           )
+      )
+    if settings.calibration_path is not None:
+      calibration_scorers[organism] = calibration.load(
+          settings.calibration_path
       )
 
   init_fn, apply_fn, junctions_apply_fn = create_model(
@@ -1351,6 +1379,7 @@ def create(
       pas_gtfs=pas_gtfs,
       num_splice_sites=model_settings.num_splice_sites,
       splice_site_threshold=model_settings.splice_site_threshold,
+      calibration_scorers=calibration_scorers,
       device=device,
   )
 

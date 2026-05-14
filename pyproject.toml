@@ -1,6 +1,6 @@
 [build-system]
 build-backend = 'hatchling.build'
-requires = ['hatchling']
+requires = ['hatchling', 'alphagenome', 'grpcio-tools']
 
 
 [project]
@@ -48,6 +48,7 @@ dependencies=[
     'optax',
     'orbax-checkpoint',
     'pandas',
+    'protobuf',
     'pyBigWig',
     'pyarrow',
     'pyfaidx',
@@ -62,6 +63,9 @@ Documentation = 'https://www.alphagenomedocs.com/'
 
 [project.optional-dependencies]
 dev = [ 'hatch' ]
+
+# Calls hatch_build.py to generate Python bindings for protos.
+[tool.hatch.build.hooks.custom]
 
 [tool.hatch.version]
 path = 'src/alphagenome_research/__init__.py'
