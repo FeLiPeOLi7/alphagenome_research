@@ -44,9 +44,6 @@ dependencies=[
     'jax',
     'jaxtyping',
     'kagglehub',
-    # Remove kagglesdk version constraint once
-    # https://github.com/Kaggle/kaggle-sdk-python/issues/43 is resolved.
-    'kagglesdk<0.1.24',
     'numpy',
     'optax',
     'orbax-checkpoint',
