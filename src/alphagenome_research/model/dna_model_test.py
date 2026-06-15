@@ -722,10 +722,17 @@ class DnaModelTest(parameterized.TestCase):
     init_fn, _, _ = dna_model.create_model(
         {o: metadata.load(o) for o in dna_model.Organism}
     )
-    params, state = jax.jit(init_fn)(
+    params_shape, state_shape = jax.eval_shape(
+        init_fn,
         jax.random.PRNGKey(0),
         jax.ShapeDtypeStruct((1, 2048, 4), dtype=jnp.float32),
         jax.ShapeDtypeStruct((1,), dtype=jnp.int32),
+    )
+    params = jax.tree.map(
+        lambda x: np.zeros(x.shape, dtype=x.dtype), params_shape
+    )
+    state = jax.tree.map(
+        lambda x: np.zeros(x.shape, dtype=x.dtype), state_shape
     )
     checkpointer = ocp.StandardCheckpointer()
     checkpoint_dir = os.path.join(self.create_tempdir().full_path, 'ckpt')

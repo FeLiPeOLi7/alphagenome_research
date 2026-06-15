@@ -71,7 +71,8 @@ class StandardizedConv1D(hk.Module):
     input_channels = x.shape[-1]
     fan_in = self._width * input_channels
     kernel_shape = (self._width, input_channels, self._num_channels)
-    w = hk.get_parameter('w', shape=kernel_shape, dtype=x.dtype, init=jnp.zeros)
+    w_init = hk.initializers.TruncatedNormal(stddev=1.0 / jnp.sqrt(fan_in))
+    w = hk.get_parameter('w', shape=kernel_shape, dtype=x.dtype, init=w_init)
 
     # Weight standardization
     w -= jnp.mean(w, axis=(0, 1), keepdims=True)
@@ -94,8 +95,9 @@ class StandardizedConv1D(hk.Module):
             lhs_spec=(0, 2, 1), rhs_spec=(2, 1, 0), out_spec=(0, 2, 1)
         ),
     )
+    bias_init = hk.initializers.TruncatedNormal(stddev=1e-4)
     bias = hk.get_parameter(
-        'bias', shape=(self._num_channels,), dtype=x.dtype, init=jnp.zeros
+        'bias', shape=(self._num_channels,), dtype=x.dtype, init=bias_init
     )
     bias = jnp.broadcast_to(bias, out.shape)
     return out + bias
@@ -108,7 +110,11 @@ class DnaEmbedder(hk.Module):
   def __call__(
       self, dna_sequence: Float[Array, 'B S 4']
   ) -> Float[Array, 'B S 768']:
-    x = hk.Conv1D(output_channels=768, kernel_shape=15)(dna_sequence)
+    x = hk.Conv1D(
+        output_channels=768,
+        kernel_shape=15,
+        b_init=hk.initializers.TruncatedNormal(stddev=1e-4),
+    )(dna_sequence)
     return x + ConvBlock(num_channels=768, width=5)(x)
 
 
@@ -141,7 +147,7 @@ class UpResBlock(hk.Module):
     )
     out = jnp.repeat(out, 2, axis=1)  # Upsampling
     residual_scale = hk.get_parameter(
-        'residual_scale', (), init=jnp.ones
+        'residual_scale', (), init=hk.initializers.Constant(0.1)
     ).astype(out.dtype)
     out *= residual_scale
     out += ConvBlock(

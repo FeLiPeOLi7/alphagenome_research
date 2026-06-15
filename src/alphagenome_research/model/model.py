@@ -204,9 +204,9 @@ class AlphaGenome(hk.Module):
     """
     trunk, intermediates = SequenceEncoder()(dna_sequence)
     if self._num_organisms >= 1:
-      organism_embedding_trunk = hk.Embed(self._num_organisms, trunk.shape[-1])(
-          organism_index
-      )
+      organism_embedding_trunk = embeddings_module._create_default_embedding(
+          self._num_organisms, trunk.shape[-1]
+      )(organism_index)
       trunk += organism_embedding_trunk[:, None, :]
     trunk, pair_activations = TransformerTower()(trunk)
 

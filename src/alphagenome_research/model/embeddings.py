@@ -69,9 +69,9 @@ class OutputEmbedder(hk.Module):
 
     x = layers.RMSBatchNorm()(x)
     if self._num_organisms >= 1:
-      organism_embedding = hk.Embed(self._num_organisms, x.shape[-1])(
-          organism_index
-      )[:, None, :]
+      organism_embedding = _create_default_embedding(
+          self._num_organisms, x.shape[-1]
+      )(organism_index)[:, None, :]
       x += organism_embedding
     return layers.gelu(x)
 
@@ -97,6 +97,16 @@ class OutputPair(hk.Module):
     x = (x + jnp.swapaxes(x, 1, 2)) / 2.0  # Symmetrize.
     x = layers.LayerNorm(rms_norm=True)(x)
     if self._num_organisms >= 1:
-      organism_embedding = hk.Embed(self._num_organisms, 128)(organism_index)
+      organism_embedding = _create_default_embedding(self._num_organisms, 128)(
+          organism_index
+      )
       x += organism_embedding[:, None, None, :]
     return layers.gelu(x)
+
+
+def _create_default_embedding(num_organisms: int, embed_dim: int) -> hk.Embed:
+  return hk.Embed(
+      vocab_size=num_organisms,
+      embed_dim=embed_dim,
+      w_init=hk.initializers.TruncatedNormal(stddev=1e-6),
+  )

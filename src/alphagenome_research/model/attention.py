@@ -87,7 +87,9 @@ class MLPBlock(hk.Module):
     h = layers.RMSBatchNorm()(x)
     h = hk.Linear(x.shape[-1] * 2)(h)
     h = jax.nn.relu(h)
-    h = hk.Linear(x.shape[-1])(h)
+    h = hk.Linear(
+        x.shape[-1], w_init=hk.initializers.TruncatedNormal(stddev=1e-6)
+    )(h)
     return layers.RMSBatchNorm()(h)
 
 
@@ -102,7 +104,10 @@ class PairMLPBlock(hk.Module):
     hidden_channels = 2 * pair_input.shape[-1]
     x = hk.Linear(hidden_channels)(x)
     x = jax.nn.relu(x)
-    x = hk.Linear(pair_input.shape[-1])(x)
+    x = hk.Linear(
+        pair_input.shape[-1],
+        w_init=hk.initializers.TruncatedNormal(stddev=1e-6),
+    )(x)
     return x
 
 
@@ -155,9 +160,11 @@ class MHABlock(hk.Module):
         v,
         precision=jax.lax.DotAlgorithmPreset.BF16_BF16_F32,
     ).astype(q.dtype)
-    y = hk.Linear(x.shape[-1], name='linear_embedding')(
-        y.reshape(batch_size, seq_len, -1)
-    )
+    y = hk.Linear(
+        x.shape[-1],
+        name='linear_embedding',
+        w_init=hk.initializers.TruncatedNormal(stddev=1e-6),
+    )(y.reshape(batch_size, seq_len, -1))
     return layers.RMSBatchNorm()(y)
 
 
@@ -168,7 +175,7 @@ class AttentionBiasBlock(hk.Module):
   def __call__(self, x: Float[Array, 'B s s D']) -> Float[Array, 'B H S S']:
     x = jax.nn.gelu(layers.RMSBatchNorm()(x))
     # 8 = number of heads in sequence MHA.
-    x = hk.Linear(8, with_bias=False)(x)
+    x = hk.Linear(8, with_bias=False, w_init=jnp.zeros)(x)
     for axis in [1, 2]:
       x = jnp.repeat(x, repeats=16, axis=axis)  # [B S S H]
     return jnp.moveaxis(x, 3, 1)
@@ -184,7 +191,11 @@ class RowAttentionBlock(hk.Module):
     x = layers.LayerNorm(rms_norm=True)(pair_input)
     k = hk.Linear(128, with_bias=False, name='linear_k')(x)
     q = hk.Linear(128, with_bias=False, name='linear_q')(x)
-    v = hk.Linear(128, name='linear_v')(x)
+    v = hk.Linear(
+        128,
+        name='linear_v',
+        w_init=hk.initializers.TruncatedNormal(stddev=1e-6),
+    )(x)
     x = jnp.einsum(
         'bpqf,bpkf->bpqk',
         q,
@@ -234,12 +245,13 @@ class SequenceToPairBlock(hk.Module):
         pos_features
     ).reshape(2 * seq_len, 32, 128)
 
-    q_bias = hk.get_parameter(
-        'q_r_bias', (1, 1, 32, 128), init=jnp.zeros
-    ).astype(x.dtype)
-    k_bias = hk.get_parameter(
-        'k_r_bias', (1, 1, 32, 128), init=jnp.zeros
-    ).astype(x.dtype)
+    b_init = hk.initializers.VarianceScaling(scale=2.0)
+    q_bias = hk.get_parameter('q_r_bias', (1, 1, 32, 128), init=b_init).astype(
+        x.dtype
+    )
+    k_bias = hk.get_parameter('k_r_bias', (1, 1, 32, 128), init=b_init).astype(
+        x.dtype
+    )
 
     rel_q_a = _shift(
         jnp.einsum('bqhc,phc->bhqp', q + q_bias, pos_encoding), seq_len, seq_len
