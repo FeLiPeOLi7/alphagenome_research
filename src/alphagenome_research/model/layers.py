@@ -61,22 +61,41 @@ class RMSBatchNorm(hk.Module):
   as an exponential moving average.
 
   Variance is computed across the batch and sequence dimension.
-
-  Note: only support inference mode (i.e. no training).
   """
 
-  def __call__(self, x: Float[Array, '... D']) -> Float[Array, '... D']:
+  def __init__(self, decay_rate: float = 0.9, name: str | None = None):
+    super().__init__(name=name)
+    self._decay_rate = decay_rate
+
+  def __call__(
+      self, x: Float[Array, '... D'], *, is_training: bool
+  ) -> Float[Array, '... D']:
+    original_dtype = x.dtype
+    axis = tuple(range(x.ndim - 1))
     param_shape = (1,) * (x.ndim - 1) + (x.shape[-1],)
-    variance = hk.get_state(
+
+    variance_ema = hk.get_state(
         'var_ema', param_shape, dtype=jnp.float32, init=jnp.ones
     )
+
+    if is_training:
+      var = jax.lax.stop_gradient(
+          jnp.mean(jnp.square(x), axis=axis, keepdims=True, dtype=jnp.float32)
+      )
+      hk.set_state(
+          'var_ema',
+          self._decay_rate * variance_ema + (1 - self._decay_rate) * var,
+      )
+    else:
+      var = variance_ema
+
     scale = hk.get_parameter(
-        'scale', param_shape, dtype=x.dtype, init=jnp.ones
-    ).astype(x.dtype)
+        'scale', param_shape, dtype=original_dtype, init=jnp.ones
+    ).astype(original_dtype)
     offset = hk.get_parameter(
-        'offset', param_shape, dtype=x.dtype, init=jnp.zeros
-    )
-    inv = scale * jax.lax.rsqrt(variance + 1e-5).astype(x.dtype)
+        'offset', param_shape, dtype=original_dtype, init=jnp.zeros
+    ).astype(original_dtype)
+    inv = scale * jax.lax.rsqrt(var + 1e-5).astype(original_dtype)
     return x * inv + offset
 
 

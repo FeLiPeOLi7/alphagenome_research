@@ -42,7 +42,7 @@ class ConvolutionsTest(parameterized.TestCase):
     def _conv_block(x):
       return convolutions.ConvBlock(
           num_channels=self._output_channels, width=width
-      )(x)
+      )(x, is_training=False)
 
     conv_block = hk.transform_with_state(_conv_block)
     x = jnp.zeros(
@@ -66,14 +66,14 @@ class ConvolutionsTest(parameterized.TestCase):
         (self._batch_size, self._sequence_length, self._input_channels)
     )
     params, state = standardized_conv1d.init(self._rng, x)
-    out, state = standardized_conv1d.apply(params, state, self._rng, x)
+    out, _ = standardized_conv1d.apply(params, state, self._rng, x)
     chex.assert_shape(
         out, (self._batch_size, self._sequence_length, self._output_channels)
     )
 
   def test_dna_embedder_output_shape(self):
     def _dna_embedder(x):
-      return convolutions.DnaEmbedder()(x)
+      return convolutions.DnaEmbedder()(x, is_training=False)
 
     dna_embedder = hk.transform_with_state(_dna_embedder)
     x = jnp.zeros((self._batch_size, self._sequence_length, 4))
@@ -91,7 +91,7 @@ class ConvolutionsTest(parameterized.TestCase):
 
   def test_down_res_block_output_shape(self):
     def _down_res_block(x):
-      return convolutions.DownResBlock()(x)
+      return convolutions.DownResBlock()(x, is_training=False)
 
     down_res_block = hk.transform_with_state(_down_res_block)
     x = jnp.zeros(
@@ -111,7 +111,7 @@ class ConvolutionsTest(parameterized.TestCase):
 
   def test_up_res_block_output_shape(self):
     def _up_res_block(x, unet_skip):
-      return convolutions.UpResBlock()(x, unet_skip)
+      return convolutions.UpResBlock()(x, unet_skip, is_training=False)
 
     up_res_block = hk.transform_with_state(_up_res_block)
     x = jnp.zeros(

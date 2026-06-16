@@ -40,14 +40,16 @@ class SequenceEncoder(hk.Module):
 
   @typing.jaxtyped
   def __call__(
-      self, dna_sequence: Float[Array, 'B S 4']
+      self, dna_sequence: Float[Array, 'B S 4'], *, is_training: bool
   ) -> tuple[Float[Array, 'B S//128 D'], dict[str, Array]]:
     intermediates = {}
-    x = convolutions.DnaEmbedder()(dna_sequence)
+    x = convolutions.DnaEmbedder()(dna_sequence, is_training=is_training)
     intermediates['bin_size_1'] = x
     x = layers.pool(x)
     for block_idx, bin_size in enumerate([2, 4, 8, 16, 32, 64]):
-      x = convolutions.DownResBlock(f'downres_block_{block_idx}')(x)
+      x = convolutions.DownResBlock(f'downres_block_{block_idx}')(
+          x, is_training=is_training
+      )
       intermediates[f'bin_size_{bin_size}'] = x
       x = layers.pool(x)
     return x, intermediates
@@ -58,10 +60,16 @@ class SequenceDecoder(hk.Module):
 
   @typing.jaxtyped
   def __call__(
-      self, x: Float[Array, 'B S D'], intermediates: dict[str, Array]
+      self,
+      x: Float[Array, 'B S D'],
+      intermediates: dict[str, Array],
+      *,
+      is_training: bool,
   ) -> Float[Array, 'B S_final D_final']:
     for bin_size in [64, 32, 16, 8, 4, 2, 1]:
-      x = convolutions.UpResBlock()(x, intermediates[f'bin_size_{bin_size}'])
+      x = convolutions.UpResBlock()(
+          x, intermediates[f'bin_size_{bin_size}'], is_training=is_training
+      )
     return x
 
 
@@ -70,15 +78,15 @@ class TransformerTower(hk.Module):
 
   @typing.jaxtyped
   def __call__(
-      self, x: Float[Array, 'B S C']
+      self, x: Float[Array, 'B S C'], *, is_training: bool
   ) -> tuple[Float[Array, 'B S C'], Float[Array, 'B S//16 S//16 F'] | None]:
     pair_x = None
     for i in range(9):
       if i % 2 == 0:
         pair_x = attention.PairUpdateBlock()(x, pair_x)
-      mha_bias = attention.AttentionBiasBlock()(pair_x)
-      x += attention.MHABlock()(x, mha_bias)
-      x += attention.MLPBlock()(x)
+      mha_bias = attention.AttentionBiasBlock()(pair_x, is_training)
+      x += attention.MHABlock()(x, mha_bias, is_training=is_training)
+      x += attention.MLPBlock()(x, is_training=is_training)
     return x, pair_x
 
 
@@ -191,32 +199,37 @@ class AlphaGenome(hk.Module):
       self,
       dna_sequence: Float[Array, 'B S 4'],
       organism_index: Int[Array, 'B'],
+      *,
+      is_training: bool = False,
   ) -> tuple[PyTree[Shaped[Array, 'B ...']], embeddings_module.Embeddings]:
     """Encodes a sequence of DNA and makes predictions for various heads.
 
     Args:
       dna_sequence: The sequence of DNA to encode.
       organism_index: The organism index.
+      is_training: Whether the model is in training mode.
 
     Returns:
       A tuple of (predictions, embeddings), where predictions is a dictionary
       of predictions for various heads.
     """
-    trunk, intermediates = SequenceEncoder()(dna_sequence)
+    trunk, intermediates = SequenceEncoder()(
+        dna_sequence, is_training=is_training
+    )
     if self._num_organisms >= 1:
       organism_embedding_trunk = embeddings_module._create_default_embedding(
           self._num_organisms, trunk.shape[-1]
       )(organism_index)
       trunk += organism_embedding_trunk[:, None, :]
-    trunk, pair_activations = TransformerTower()(trunk)
+    trunk, pair_activations = TransformerTower()(trunk, is_training=is_training)
 
-    x = SequenceDecoder()(trunk, intermediates)
+    x = SequenceDecoder()(trunk, intermediates, is_training=is_training)
 
     embeddings_128bp = embeddings_module.OutputEmbedder(self._num_organisms)(
-        trunk, organism_index
+        trunk, organism_index, is_training=is_training
     )
     embeddings_1bp = embeddings_module.OutputEmbedder(self._num_organisms)(
-        x, organism_index, embeddings_128bp
+        x, organism_index, is_training=is_training, skip_x=embeddings_128bp
     )
     embeddings_pair = embeddings_module.OutputPair(self._num_organisms)(
         pair_activations, organism_index

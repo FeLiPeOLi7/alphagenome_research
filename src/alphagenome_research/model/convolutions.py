@@ -40,9 +40,9 @@ class ConvBlock(hk.Module):
 
   @typing.jaxtyped
   def __call__(
-      self, x: Float[Array, 'B S D']
+      self, x: Float[Array, 'B S D'], *, is_training: bool
   ) -> Float[Array, 'B S {self._num_channels}']:
-    x = layers.gelu(layers.RMSBatchNorm()(x))
+    x = layers.gelu(layers.RMSBatchNorm()(x, is_training=is_training))
     if self._width == 1:
       return hk.Linear(self._num_channels)(x)
     else:
@@ -108,27 +108,33 @@ class DnaEmbedder(hk.Module):
 
   @typing.jaxtyped
   def __call__(
-      self, dna_sequence: Float[Array, 'B S 4']
+      self, dna_sequence: Float[Array, 'B S 4'], *, is_training: bool
   ) -> Float[Array, 'B S 768']:
     x = hk.Conv1D(
         output_channels=768,
         kernel_shape=15,
         b_init=hk.initializers.TruncatedNormal(stddev=1e-4),
     )(dna_sequence)
-    return x + ConvBlock(num_channels=768, width=5)(x)
+    return x + ConvBlock(num_channels=768, width=5)(x, is_training=is_training)
 
 
 class DownResBlock(hk.Module):
   """Down resolution convolution."""
 
   @typing.jaxtyped
-  def __call__(self, x: Float[Array, 'B S D']) -> Float[Array, 'B S D+128']:
+  def __call__(
+      self, x: Float[Array, 'B S D'], *, is_training: bool
+  ) -> Float[Array, 'B S D+128']:
     num_out_channels = x.shape[-1] + 128
-    out = ConvBlock(num_channels=num_out_channels, width=5)(x)
+    out = ConvBlock(num_channels=num_out_channels, width=5)(
+        x, is_training=is_training
+    )
     out = out + jnp.pad(
         x, [(0, 0), (0, 0), (0, 128)]
     )  # Padding for residual connection
-    return out + ConvBlock(num_channels=out.shape[-1], width=5)(out)
+    return out + ConvBlock(num_channels=out.shape[-1], width=5)(
+        out, is_training=is_training
+    )
 
 
 class UpResBlock(hk.Module):
@@ -136,13 +142,19 @@ class UpResBlock(hk.Module):
 
   @typing.jaxtyped
   def __call__(
-      self, x: Float[Array, 'B S D'], unet_skip: Float[Array, 'B S_skip D_skip']
+      self,
+      x: Float[Array, 'B S D'],
+      unet_skip: Float[Array, 'B S_skip D_skip'],
+      *,
+      is_training: bool,
   ) -> Float[Array, 'B S_up D_skip']:
     chex.assert_rank(x, 3)
     chex.assert_rank(unet_skip, 3)
     num_channels = unet_skip.shape[-1]
     out = (
-        ConvBlock(num_channels=num_channels, width=5, name='conv_in')(x)
+        ConvBlock(num_channels=num_channels, width=5, name='conv_in')(
+            x, is_training=is_training
+        )
         + x[:, :, :num_channels]
     )
     out = jnp.repeat(out, 2, axis=1)  # Upsampling
@@ -152,7 +164,7 @@ class UpResBlock(hk.Module):
     out *= residual_scale
     out += ConvBlock(
         num_channels=num_channels, width=1, name='pointwise_conv_unet_skip'
-    )(unet_skip)
+    )(unet_skip, is_training=is_training)
     return out + ConvBlock(num_channels=num_channels, width=5, name='conv_out')(
-        out
+        out, is_training=is_training
     )

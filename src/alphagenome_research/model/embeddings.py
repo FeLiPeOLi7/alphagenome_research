@@ -59,6 +59,8 @@ class OutputEmbedder(hk.Module):
       self,
       x: Float[Array, 'B S D'],
       organism_index: Int[Array, 'B'],
+      *,
+      is_training: bool,
       skip_x: Float[Array, 'B S_skip D_skip'] | None = None,
   ) -> Float[Array, 'B S D_out']:
     x = hk.Linear(2 * x.shape[-1])(x)
@@ -67,7 +69,7 @@ class OutputEmbedder(hk.Module):
       skip_x = hk.Linear(x.shape[-1], with_bias=False)(skip_x)
       x += jnp.repeat(skip_x, x.shape[1] // skip_x.shape[1], axis=1)
 
-    x = layers.RMSBatchNorm()(x)
+    x = layers.RMSBatchNorm()(x, is_training=is_training)
     if self._num_organisms >= 1:
       organism_embedding = _create_default_embedding(
           self._num_organisms, x.shape[-1]

@@ -83,14 +83,16 @@ class MLPBlock(hk.Module):
   """MLP block for sequence representations."""
 
   @typing.jaxtyped
-  def __call__(self, x: Float[Array, 'B S D']) -> Float[Array, 'B S D']:
-    h = layers.RMSBatchNorm()(x)
+  def __call__(
+      self, x: Float[Array, 'B S D'], *, is_training: bool
+  ) -> Float[Array, 'B S D']:
+    h = layers.RMSBatchNorm()(x, is_training=is_training)
     h = hk.Linear(x.shape[-1] * 2)(h)
     h = jax.nn.relu(h)
     h = hk.Linear(
         x.shape[-1], w_init=hk.initializers.TruncatedNormal(stddev=1e-6)
     )(h)
-    return layers.RMSBatchNorm()(h)
+    return layers.RMSBatchNorm()(h, is_training=is_training)
 
 
 class PairMLPBlock(hk.Module):
@@ -116,10 +118,14 @@ class MHABlock(hk.Module):
 
   @typing.jaxtyped
   def __call__(
-      self, x: Float[Array, 'B S D'], attention_bias: Float[Array, 'B H S S']
+      self,
+      x: Float[Array, 'B S D'],
+      attention_bias: Float[Array, 'B H S S'],
+      *,
+      is_training: bool,
   ) -> Float[Array, 'B S D']:
     batch_size, seq_len, _ = x.shape
-    h = layers.RMSBatchNorm()(x)
+    h = layers.RMSBatchNorm()(x, is_training=is_training)
     q = layers.LayerNorm(name='norm_q')(
         hk.Linear(8 * 128, with_bias=False, name='q_layer')(h).reshape(
             batch_size, seq_len, 8, 128
@@ -165,15 +171,17 @@ class MHABlock(hk.Module):
         name='linear_embedding',
         w_init=hk.initializers.TruncatedNormal(stddev=1e-6),
     )(y.reshape(batch_size, seq_len, -1))
-    return layers.RMSBatchNorm()(y)
+    return layers.RMSBatchNorm()(y, is_training=is_training)
 
 
 class AttentionBiasBlock(hk.Module):
   """Generates attention bias for Multi-Head Attention."""
 
   @typing.jaxtyped
-  def __call__(self, x: Float[Array, 'B s s D']) -> Float[Array, 'B H S S']:
-    x = jax.nn.gelu(layers.RMSBatchNorm()(x))
+  def __call__(
+      self, x: Float[Array, 'B s s D'], is_training: bool
+  ) -> Float[Array, 'B H S S']:
+    x = jax.nn.gelu(layers.RMSBatchNorm()(x, is_training=is_training))
     # 8 = number of heads in sequence MHA.
     x = hk.Linear(8, with_bias=False, w_init=jnp.zeros)(x)
     for axis in [1, 2]:

@@ -36,7 +36,7 @@ class ConvolutionsTest(parameterized.TestCase):
 
     def _forward(x):
       module = attention.MLPBlock()
-      return module(x)
+      return module(x, is_training=False)
 
     init, apply = hk.transform_with_state(_forward)
     x = jnp.zeros((self._batch_size, self._sequence_length, self._hidden_size))
