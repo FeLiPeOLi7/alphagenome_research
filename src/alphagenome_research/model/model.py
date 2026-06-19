@@ -217,7 +217,7 @@ class AlphaGenome(hk.Module):
         dna_sequence, is_training=is_training
     )
     if self._num_organisms >= 1:
-      organism_embedding_trunk = embeddings_module._create_default_embedding(
+      organism_embedding_trunk = embeddings_module.create_default_embedding(
           self._num_organisms, trunk.shape[-1]
       )(organism_index)
       trunk += organism_embedding_trunk[:, None, :]
