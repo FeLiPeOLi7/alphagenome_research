@@ -803,7 +803,8 @@ class AlphaGenomeModel(dna_model.DnaModel):
       output_metadata = self.output_metadata(organism)
 
       results = []
-
+      # Predictions are reverse-complemented by the model before scoring.
+      interval = interval.as_unstranded()
       for scorer_settings in interval_scorers:
         scorer = self._interval_scorers[organism][
             scorer_settings.base_interval_scorer
@@ -931,7 +932,8 @@ class AlphaGenomeModel(dna_model.DnaModel):
       output_metadata = self.output_metadata(organism)
 
       results = []
-
+      # Predictions are reverse-complemented by the model before scoring.
+      interval = interval.as_unstranded()
       for scorer_settings in variant_scorers:
         scorer = self._variant_scorers[organism][
             scorer_settings.base_variant_scorer
