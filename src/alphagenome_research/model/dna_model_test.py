@@ -719,7 +719,7 @@ class DnaModelTest(parameterized.TestCase):
   def test_create(
       self, model_metadata: metadata.AlphaGenomeOutputMetadata | None
   ):
-    init_fn, _, _ = dna_model.create_model(
+    init_fn, _, _, _, _ = dna_model.create_model(
         {o: metadata.load(o) for o in dna_model.Organism}
     )
     params_shape, state_shape = jax.eval_shape(
@@ -787,7 +787,7 @@ class DnaModelTest(parameterized.TestCase):
     )
 
   def test_create_model(self):
-    init, apply, apply_junctions = dna_model.create_model(
+    init, apply, _, _, apply_junctions = dna_model.create_model(
         {dna_model.Organism.HOMO_SAPIENS: self._metadata}
     )
 
@@ -852,6 +852,110 @@ class DnaModelTest(parameterized.TestCase):
     }
     chex.assert_trees_all_equal_shapes_and_dtypes(
         junction_predictions, expected_junction_predictions
+    )
+
+  def test_create_model_trunk_heads(self):
+    init, _, apply_trunk, apply_heads, _ = dna_model.create_model(
+        {dna_model.Organism.HOMO_SAPIENS: self._metadata}
+    )
+
+    dna_sequence_shape = jax.ShapeDtypeStruct((1, 2048, 4), dtype=jnp.float32)
+    organism_index_shape = jax.ShapeDtypeStruct((1,), dtype=jnp.int32)
+
+    params, state = jax.eval_shape(
+        init, jax.random.PRNGKey(0), dna_sequence_shape, organism_index_shape
+    )
+
+    embeddings_out = jax.eval_shape(
+        apply_trunk, params, state, dna_sequence_shape, organism_index_shape
+    )
+
+    self.assertEqual(embeddings_out.embeddings_1bp.shape, (1, 2048, 1536))
+    self.assertEqual(embeddings_out.embeddings_128bp.shape, (1, 16, 3072))
+    self.assertEqual(embeddings_out.embeddings_pair.shape, (1, 1, 1, 128))
+    self.assertEqual(embeddings_out.embeddings_1bp.dtype, jnp.bfloat16)
+    self.assertEqual(embeddings_out.embeddings_128bp.dtype, jnp.bfloat16)
+    self.assertEqual(embeddings_out.embeddings_pair.dtype, jnp.bfloat16)
+
+    predictions = jax.eval_shape(
+        apply_heads,
+        params,
+        state,
+        embeddings_out.embeddings_1bp,
+        embeddings_out.embeddings_128bp,
+        embeddings_out.embeddings_pair,
+        organism_index_shape,
+    )
+    expected_predictions = {
+        dna_output.OutputType.ATAC: jax.ShapeDtypeStruct(
+            (1, 2048, 2), dtype=jnp.bfloat16
+        ),
+        dna_output.OutputType.DNASE: jax.ShapeDtypeStruct(
+            (1, 2048, 1), dtype=jnp.bfloat16
+        ),
+        dna_output.OutputType.CHIP_TF: jax.ShapeDtypeStruct(
+            (1, 16, 2), dtype=jnp.bfloat16
+        ),
+        dna_output.OutputType.SPLICE_SITES: jax.ShapeDtypeStruct(
+            (1, 2048, 5), dtype=jnp.bfloat16
+        ),
+        dna_output.OutputType.SPLICE_JUNCTIONS: {
+            'predictions': jax.ShapeDtypeStruct(
+                (1, 512, 512, 24), dtype=jnp.bfloat16
+            ),
+            'splice_site_positions': jax.ShapeDtypeStruct(
+                (1, 4, 512), dtype=jnp.int32
+            ),
+        },
+        dna_output.OutputType.CONTACT_MAPS: jax.ShapeDtypeStruct(
+            (1, 1, 1, 2), dtype=jnp.bfloat16
+        ),
+    }
+    chex.assert_trees_all_equal_shapes_and_dtypes(
+        dna_model.extract_predictions(predictions, dna_output.OutputType),
+        expected_predictions,
+    )
+
+  def test_apply_equals_trunk_then_heads(self):
+    init, apply, apply_trunk, apply_heads, _ = dna_model.create_model(
+        {dna_model.Organism.HOMO_SAPIENS: self._metadata}
+    )
+
+    dna_sequence_shape = jax.ShapeDtypeStruct((1, 2048, 4), dtype=jnp.float32)
+    organism_index_shape = jax.ShapeDtypeStruct((1,), dtype=jnp.int32)
+
+    params, state = jax.eval_shape(
+        init, jax.random.PRNGKey(0), dna_sequence_shape, organism_index_shape
+    )
+
+    # Full forward pass.
+    full_predictions = jax.eval_shape(
+        apply, params, state, dna_sequence_shape, organism_index_shape
+    )
+
+    # Composed trunk → heads pass.
+    embeddings_out = jax.eval_shape(
+        apply_trunk, params, state, dna_sequence_shape, organism_index_shape
+    )
+    composed_predictions = jax.eval_shape(
+        apply_heads,
+        params,
+        state,
+        embeddings_out.embeddings_1bp,
+        embeddings_out.embeddings_128bp,
+        embeddings_out.embeddings_pair,
+        organism_index_shape,
+    )
+
+    # Extract the same output types from both and compare.
+    full_extracted = dna_model.extract_predictions(
+        full_predictions, dna_output.OutputType
+    )
+    composed_extracted = dna_model.extract_predictions(
+        composed_predictions, dna_output.OutputType
+    )
+    chex.assert_trees_all_equal_shapes_and_dtypes(
+        full_extracted, composed_extracted
     )
 
   @parameterized.parameters(('all_folds',), (dna_model.ModelVersion.ALL_FOLDS,))

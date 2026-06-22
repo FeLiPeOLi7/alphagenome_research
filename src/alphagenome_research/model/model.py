@@ -194,14 +194,14 @@ class AlphaGenome(hk.Module):
           splice_site_positions=splice_site_positions,
       )
 
-  @typing.jaxtyped
-  def __call__(
+  @hk.name_like('__call__')
+  def forward_trunk(
       self,
       dna_sequence: Float[Array, 'B S 4'],
       organism_index: Int[Array, 'B'],
       *,
       is_training: bool = False,
-  ) -> tuple[PyTree[Shaped[Array, 'B ...']], embeddings_module.Embeddings]:
+  ) -> embeddings_module.Embeddings:
     """Encodes a sequence of DNA and makes predictions for various heads.
 
     Args:
@@ -242,8 +242,17 @@ class AlphaGenome(hk.Module):
     )
     if self._freeze_trunk_embeddings:
       embeddings = jax.lax.stop_gradient(embeddings)
+    return embeddings
+
+  @hk.name_like('__call__')
+  def forward_heads(
+      self,
+      embeddings: embeddings_module.Embeddings,
+      organism_index: Int[Array, 'B'],
+  ) -> PyTree[Float[Array, 'B ...']]:
+    """Computes predictions for various heads from embeddings."""
     predictions = {
-        'embeddings_1bp': embeddings_1bp,
+        'embeddings_1bp': embeddings.embeddings_1bp,
     }
     with hk.name_scope('head'):
       for head_name, head_fn in self._heads.items():
@@ -280,6 +289,26 @@ class AlphaGenome(hk.Module):
       predictions[junction_head.value] = self.predict_junctions(
           embeddings.embeddings_1bp, splice_site_positions, organism_index
       )
+    return predictions
+
+  @typing.jaxtyped
+  def __call__(
+      self,
+      dna_sequence: Float[Array, 'B S 4'],
+      organism_index: Int[Array, 'B'],
+  ) -> tuple[PyTree[Shaped[Array, 'B ...']], embeddings_module.Embeddings]:
+    """Encodes a sequence of DNA and makes predictions for various heads.
+
+    Args:
+      dna_sequence: The sequence of DNA to encode.
+      organism_index: The organism index.
+
+    Returns:
+      A tuple of (predictions, embeddings), where predictions is a dictionary
+      of predictions for various heads.
+    """
+    embeddings = self.forward_trunk(dna_sequence, organism_index)
+    predictions = self.forward_heads(embeddings, organism_index)
     return predictions, embeddings
 
   @typing.jaxtyped

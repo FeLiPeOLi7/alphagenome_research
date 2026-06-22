@@ -36,6 +36,7 @@ from alphagenome_research.io import fasta
 from alphagenome_research.io import genome as genome_io
 from alphagenome_research.io import splicing as splicing_io
 from alphagenome_research.model import augmentation
+from alphagenome_research.model import embeddings as embeddings_lib
 from alphagenome_research.model import model
 from alphagenome_research.model import one_hot_encoder
 from alphagenome_research.model import splicing
@@ -1225,9 +1226,24 @@ def create_model(
         tuple[hk.Params, hk.State],
     ],
     ApplyFn,
+    Callable[
+        [hk.Params, hk.State, Float[Array, 'B S 4'], Int32[Array, 'B']],
+        embeddings_lib.Embeddings,
+    ],
+    Callable[
+        [
+            hk.Params,
+            hk.State,
+            Float[Array, 'B S D1'],
+            Float[Array, 'B S128 D2'],
+            Float[Array, 'B Sp Sp Dp'],
+            Int32[Array, 'B'],
+        ],
+        PyTree[Shaped[Array, 'B ...']],
+    ],
     JunctionsApplyFn,
 ]:
-  """Helper to create AlphaGenome init and two apply functions."""
+  """Helper to create AlphaGenome init and four apply functions."""
 
   jmp_policy = jmp.get_policy('params=float32,compute=bfloat16,output=bfloat16')
 
@@ -1244,6 +1260,54 @@ def create_model(
           splice_site_threshold=splice_site_threshold,
       )(dna_sequence, organism_index)
 
+  @hk.transform_with_state
+  def _forward_trunk(
+      dna_sequence: Float[Array, 'B S 4'],
+      organism_index: Int32[Array, 'B'],
+  ):
+    """AlphaGenome trunk-only forward pass."""
+    with hk.mixed_precision.push_policy(model.AlphaGenome, jmp_policy):
+      return model.AlphaGenome(
+          metadata,
+          num_splice_sites=num_splice_sites,
+          splice_site_threshold=splice_site_threshold,
+      ).forward_trunk(dna_sequence, organism_index)
+
+  @hk.transform_with_state
+  def _forward_heads(
+      embeddings_1bp: Float[Array, 'B S D1'],
+      embeddings_128bp: Float[Array, 'B S//128 D2'],
+      embeddings_pair: Float[Array, 'B Sp Sp Dp'],
+      organism_index: Int32[Array, 'B'],
+  ):
+    """AlphaGenome heads-only forward pass."""
+    with hk.mixed_precision.push_policy(model.AlphaGenome, jmp_policy):
+      return model.AlphaGenome(
+          metadata,
+          num_splice_sites=num_splice_sites,
+          splice_site_threshold=splice_site_threshold,
+      ).forward_heads(
+          embeddings_lib.Embeddings(
+              embeddings_1bp=embeddings_1bp,
+              embeddings_128bp=embeddings_128bp,
+              embeddings_pair=embeddings_pair,
+          ),
+          organism_index,
+      )
+
+  @hk.transform_with_state
+  def _forward_junctions(
+      trunk_embeddings, splice_site_positions, organism_index
+  ):
+    with hk.mixed_precision.push_policy(model.AlphaGenome, jmp_policy):
+      return model.AlphaGenome(
+          metadata,
+          num_splice_sites=num_splice_sites,
+          splice_site_threshold=splice_site_threshold,
+      ).predict_junctions(
+          trunk_embeddings, splice_site_positions, organism_index
+      )
+
   def _apply_fn(
       params: hk.Params,
       state: hk.State,
@@ -1256,28 +1320,46 @@ def create_model(
     )
     return predictions
 
+  def _trunk_apply_fn(
+      params: hk.Params,
+      state: hk.State,
+      dna_sequence: Float[Array, 'B S 4'],
+      organism_index: Int32[Array, 'B'],
+  ) -> embeddings_lib.Embeddings:
+    """AlphaGenome trunk apply function."""
+    embeddings, _ = _forward_trunk.apply(
+        params, state, None, dna_sequence, organism_index
+    )
+    return embeddings
+
+  def _heads_apply_fn(
+      params: hk.Params,
+      state: hk.State,
+      embeddings_1bp: Float[Array, 'B S D1'],
+      embeddings_128bp: Float[Array, 'B S128 D2'],
+      embeddings_pair: Float[Array, 'B Sp Sp Dp'],
+      organism_index: Int32[Array, 'B'],
+  ) -> PyTree[Shaped[Array, 'B ...']]:
+    """AlphaGenome heads apply function."""
+    predictions, _ = _forward_heads.apply(
+        params,
+        state,
+        None,
+        embeddings_1bp,
+        embeddings_128bp,
+        embeddings_pair,
+        organism_index,
+    )
+    return predictions
+
   def _junctions_apply_fn(
       params: hk.Params,
       state: hk.State,
       trunk_embeddings: Float[Array, 'B S D'],
       splice_site_positions: Int32[Array, 'B 4 K'],
       organism_index: Int32[Array, 'B'],
-  ):
+  ) -> BatchPrediction:
     """AlphaGenome junctions apply function."""
-
-    @hk.transform_with_state
-    def _forward_junctions(
-        trunk_embeddings, splice_site_positions, organism_index
-    ):
-      with hk.mixed_precision.push_policy(model.AlphaGenome, jmp_policy):
-        return model.AlphaGenome(
-            metadata,
-            num_splice_sites=num_splice_sites,
-            splice_site_threshold=splice_site_threshold,
-        ).predict_junctions(
-            trunk_embeddings, splice_site_positions, organism_index
-        )
-
     predictions, _ = _forward_junctions.apply(
         params,
         state,
@@ -1288,7 +1370,13 @@ def create_model(
     )
     return predictions
 
-  return _forward.init, _apply_fn, _junctions_apply_fn
+  return (
+      _forward.init,
+      _apply_fn,
+      _trunk_apply_fn,
+      _heads_apply_fn,
+      _junctions_apply_fn,
+  )
 
 
 def create(
@@ -1351,7 +1439,7 @@ def create(
           settings.calibration_path
       )
 
-  init_fn, apply_fn, junctions_apply_fn = create_model(
+  init_fn, apply_fn, _, _, junctions_apply_fn = create_model(
       metadata,
       num_splice_sites=model_settings.num_splice_sites,
       splice_site_threshold=model_settings.splice_site_threshold,
