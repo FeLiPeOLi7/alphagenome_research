@@ -26,6 +26,7 @@ from alphagenome.models import variant_scorers
 from alphagenome_research.io import fasta
 from alphagenome_research.io import splicing
 from alphagenome_research.model import dna_model
+from alphagenome_research.model import embeddings
 from alphagenome_research.model.metadata import metadata
 from alphagenome_research.model.variant_scoring.calibration import calibration
 from alphagenome_research.protos import calibration_scores_pb2
@@ -226,6 +227,101 @@ class DnaModelTest(parameterized.TestCase):
 
     self._mock_model_junctions = _apply_fn_junctions
 
+    def _mock_trunk_apply_fn(params, state, dna_sequence, organism_index):
+      del params, state, organism_index
+      batch_size, sequence_length = dna_sequence.shape[0], dna_sequence.shape[1]
+      return embeddings.Embeddings(
+          embeddings_1bp=jnp.zeros(
+              (batch_size, sequence_length, 1536), dtype=jnp.bfloat16
+          ),
+          embeddings_128bp=jnp.zeros(
+              (batch_size, sequence_length // 128, 3072), dtype=jnp.bfloat16
+          ),
+          embeddings_pair=jnp.zeros(
+              (
+                  batch_size,
+                  sequence_length // 2048,
+                  sequence_length // 2048,
+                  128,
+              ),
+              dtype=jnp.bfloat16,
+          ),
+      )
+
+    self._mock_trunk_apply_fn = _mock_trunk_apply_fn
+
+    def _mock_heads_apply_fn(
+        params,
+        state,
+        embeddings_1bp,
+        embeddings_128bp,
+        embeddings_pair,
+        organism_index,
+    ):
+      del params, state, embeddings_128bp, embeddings_pair, organism_index
+      batch_size, sequence_length = (
+          embeddings_1bp.shape[0],
+          embeddings_1bp.shape[1],
+      )
+      splice_site_positions = (
+          np.ones((batch_size, 4, self._num_splice_sites), dtype=np.int32) * -1
+      )
+      splice_site_positions[:, 0, 0] = 100  # pos donor
+      splice_site_positions[:, 1, 0] = 200  # pos acceptor
+      splice_site_positions[:, 2, 0] = 300  # neg donor
+      splice_site_positions[:, 3, 0] = 50  # neg acceptor
+      return {
+          'atac': {
+              'predictions_1bp': jnp.zeros(
+                  (batch_size, sequence_length, len(self._metadata.atac)),
+                  dtype=jnp.bfloat16,
+              )
+          },
+          'dnase': {
+              'predictions_1bp': jnp.zeros(
+                  (batch_size, sequence_length, len(self._metadata.dnase))
+              )
+          },
+          'contact_maps': {
+              'predictions': jnp.zeros((
+                  batch_size,
+                  sequence_length // 2048,
+                  sequence_length // 2048,
+                  len(self._metadata.contact_maps),
+              ))
+          },
+          'splice_sites_classification': {
+              'predictions': jnp.ones(
+                  (
+                      batch_size,
+                      sequence_length,
+                      5,
+                  ),
+                  dtype=jnp.bfloat16,
+              ),
+          },
+          'splice_sites_junction': {
+              'predictions': jnp.ones(
+                  (
+                      batch_size,
+                      self._num_splice_sites,
+                      self._num_splice_sites,
+                      2 * self._num_tissues + 4,  # Add 4 to mimic padding.
+                  ),
+                  dtype=jnp.bfloat16,
+              ),
+              'splice_site_positions': jnp.array(splice_site_positions),
+          },
+          'embeddings_1bp': embeddings_1bp,
+          'chip_tf': {
+              'predictions_128bp': jnp.zeros(
+                  (batch_size, sequence_length // 128, 2), dtype=jnp.bfloat16
+              )
+          },
+      }
+
+    self._mock_heads_apply_fn = _mock_heads_apply_fn
+
   @parameterized.parameters([
       dict(organism=dna_model.Organism.HOMO_SAPIENS, expected_index=0),
       dict(organism=dna_model.Organism.MUS_MUSCULUS, expected_index=1),
@@ -398,21 +494,85 @@ class DnaModelTest(parameterized.TestCase):
               dna_output.OutputType.ATAC: (2048, 2),
               dna_output.OutputType.DNASE: (2048, 1),
           },
+          variant='chr1:1024:A>C',
+          use_stitching=False,
       ),
       dict(
           requested_outputs=[
               dna_output.OutputType.ATAC,
               dna_output.OutputType.DNASE,
           ],
-          requested_ontologies=[ontology.from_curie('CL:0000001')],
+          requested_ontologies=None,
           expected_shapes={
               dna_output.OutputType.ATAC: (2048, 2),
-              dna_output.OutputType.DNASE: (2048, 0),
+              dna_output.OutputType.DNASE: (2048, 1),
           },
+          variant='chr1:1024:ATG>A',
+          use_stitching=False,
+      ),
+      dict(
+          requested_outputs=[
+              dna_output.OutputType.ATAC,
+              dna_output.OutputType.DNASE,
+          ],
+          requested_ontologies=None,
+          expected_shapes={
+              dna_output.OutputType.ATAC: (2048, 2),
+              dna_output.OutputType.DNASE: (2048, 1),
+          },
+          variant='chr1:1024:ATG>A',
+          use_stitching=True,
+      ),
+      dict(
+          requested_outputs=[
+              dna_output.OutputType.ATAC,
+              dna_output.OutputType.DNASE,
+          ],
+          requested_ontologies=None,
+          expected_shapes={
+              dna_output.OutputType.ATAC: (2048, 2),
+              dna_output.OutputType.DNASE: (2048, 1),
+          },
+          variant='chr1:1024:A>ATG',
+          use_stitching=True,
+      ),
+      dict(
+          requested_outputs=[
+              dna_output.OutputType.ATAC,
+              dna_output.OutputType.DNASE,
+          ],
+          requested_ontologies=None,
+          expected_shapes={
+              dna_output.OutputType.ATAC: (2048, 2),
+              dna_output.OutputType.DNASE: (2048, 1),
+          },
+          variant='chr1:1024:ATG>A',
+          use_stitching=True,
+          negative_strand=True,
+      ),
+      dict(
+          requested_outputs=[
+              dna_output.OutputType.ATAC,
+              dna_output.OutputType.DNASE,
+          ],
+          requested_ontologies=None,
+          expected_shapes={
+              dna_output.OutputType.ATAC: (2048, 2),
+              dna_output.OutputType.DNASE: (2048, 1),
+          },
+          variant='chr1:1024:A>ATG',
+          use_stitching=True,
+          negative_strand=True,
       ),
   ])
   def test_predict_variant(
-      self, requested_outputs, requested_ontologies, expected_shapes
+      self,
+      requested_outputs,
+      requested_ontologies,
+      expected_shapes,
+      variant,
+      use_stitching,
+      negative_strand=False,
   ):
     mock_fasta_extractor = mock.create_autospec(fasta.FastaExtractor)
     mock_fasta_extractor.extract.side_effect = lambda x: 'A' * x.width
@@ -424,11 +584,16 @@ class DnaModelTest(parameterized.TestCase):
         (x.width, 5), dtype=bool
     )
 
+    trunk_apply_fn = self._mock_trunk_apply_fn if use_stitching else None
+    heads_apply_fn = self._mock_heads_apply_fn if use_stitching else None
+
     model = dna_model.AlphaGenomeModel(
         params={},
         state={},
         apply_fn=self._mock_model,
         junctions_apply_fn=self._mock_model_junctions,
+        trunk_apply_fn=trunk_apply_fn,
+        heads_apply_fn=heads_apply_fn,
         metadata={dna_model.Organism.HOMO_SAPIENS: self._metadata},
         fasta_extractors={
             dna_model.Organism.HOMO_SAPIENS: mock_fasta_extractor
@@ -439,10 +604,11 @@ class DnaModelTest(parameterized.TestCase):
             dna_model.Organism.HOMO_SAPIENS: mock_splice_sites_extractor
         },
     )
-    interval = genome.Interval.from_str('chr1:0-2048:.')
+    strand = '-' if negative_strand else '.'
+    interval = genome.Interval.from_str(f'chr1:0-2048:{strand}')
     predictions = model.predict_variant(
         interval,
-        variant=genome.Variant.from_str('chr1:1024:A>C'),
+        variant=genome.Variant.from_str(variant),
         requested_outputs=requested_outputs,
         ontology_terms=requested_ontologies,
     )
@@ -455,8 +621,14 @@ class DnaModelTest(parameterized.TestCase):
       self.assertIsNotNone(output)
       chex.assert_shape(output.values, expected_shape)
 
-  @parameterized.product(with_calibration=[True, False])
-  def test_score_variant(self, with_calibration: bool):
+  @parameterized.product(
+      with_calibration=[True, False],
+      variant=['chr1:1024:A>C', 'chr1:1024:ATG>A', 'chr1:1024:A>ATG'],
+      use_stitching=[True, False],
+  )
+  def test_score_variant(
+      self, with_calibration: bool, variant: str, use_stitching: bool
+  ):
     mock_fasta_extractor = mock.create_autospec(fasta.FastaExtractor)
     mock_fasta_extractor.extract.side_effect = lambda x: 'A' * x.width
 
@@ -512,11 +684,16 @@ class DnaModelTest(parameterized.TestCase):
           mock_calibration_scorer
       )
 
+    trunk_apply_fn = self._mock_trunk_apply_fn if use_stitching else None
+    heads_apply_fn = self._mock_heads_apply_fn if use_stitching else None
+
     model = dna_model.AlphaGenomeModel(
         params={},
         state={},
         apply_fn=self._mock_model,
         junctions_apply_fn=self._mock_model_junctions,
+        trunk_apply_fn=trunk_apply_fn,
+        heads_apply_fn=heads_apply_fn,
         metadata={dna_model.Organism.HOMO_SAPIENS: self._metadata},
         fasta_extractors={
             dna_model.Organism.HOMO_SAPIENS: mock_fasta_extractor
@@ -530,7 +707,7 @@ class DnaModelTest(parameterized.TestCase):
         calibration_scorers=calibration_scorers,
     )
     interval = genome.Interval.from_str('chr1:0-2048:.')
-    variant = genome.Variant.from_str('chr1:1024:A>C')
+    variant = genome.Variant.from_str(variant)
     output = model.score_variant(interval, variant, variant_scorers=scorers)
     self.assertLen(output, len(scorers))
     for result, scorer in zip(output, scorers):

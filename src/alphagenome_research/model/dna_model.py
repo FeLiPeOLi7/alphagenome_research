@@ -37,6 +37,7 @@ from alphagenome_research.io import genome as genome_io
 from alphagenome_research.io import splicing as splicing_io
 from alphagenome_research.model import augmentation
 from alphagenome_research.model import embeddings as embeddings_lib
+from alphagenome_research.model import indel_stitch_utils
 from alphagenome_research.model import model
 from alphagenome_research.model import one_hot_encoder
 from alphagenome_research.model import splicing
@@ -96,6 +97,26 @@ JunctionsApplyFn = Callable[
         Int32[Array, 'B'],
     ],
     BatchPrediction,
+]
+TrunkApplyFn = Callable[
+    [
+        hk.Params,
+        hk.State,
+        Float32[Array, 'B S 4'],
+        Int32[Array, 'B'],
+    ],
+    embeddings_lib.Embeddings,
+]
+HeadsApplyFn = Callable[
+    [
+        hk.Params,
+        hk.State,
+        Float32[Array, 'B S D1'],
+        Float32[Array, 'B S128 D2'],
+        Float32[Array, 'B Sp Sp Dp'],
+        Int32[Array, 'B'],
+    ],
+    PyTree[Array],
 ]
 
 
@@ -186,6 +207,102 @@ def _predict(
   return predictions
 
 
+def _extract_indel_stitch_input_single(
+    variant: genome.Variant,
+    interval: genome.Interval,
+    fasta_extractor: fasta.FastaExtractor,
+    encoder: one_hot_encoder.DNAOneHotEncoder,
+    reference_sequence_encoded: Float32[ArrayLike, 'B S 4'],
+    alternate_sequence_encoded: Float32[ArrayLike, 'B S 4'],
+) -> indel_stitch_utils.IndelStitchInput | None:
+  """Extracts IndelStitchInput for a single variant."""
+  if not variant.is_deletion and not variant.is_insertion:
+    return None
+
+  interval_length = interval.width
+  unstranded = interval.as_unstranded()
+  seq_len = reference_sequence_encoded.shape[1]
+
+  if variant.is_deletion:
+    deletion_length = len(variant.reference_bases) - len(
+        variant.alternate_bases
+    )
+    shifted_interval = unstranded.shift(deletion_length)
+    ref_right_raw = fasta_extractor.extract(shifted_interval)
+    ref_right_enc = encoder.encode(ref_right_raw)
+    if interval.negative_strand:
+      ref_right_enc = ref_right_enc[::-1, ::-1]
+
+    stitch_start_fwd = (
+        variant.start + len(variant.alternate_bases) - unstranded.start
+    )
+    stitch_end_fwd = (
+        variant.start - unstranded.start + len(variant.reference_bases)
+    )
+
+    if interval.negative_strand:
+      left_sequence = ref_right_enc
+      right_sequence = reference_sequence_encoded[0]
+      left_shift = deletion_length
+      right_shift = 0
+      stitch_start = seq_len - stitch_end_fwd
+      stitch_end = seq_len - stitch_start_fwd + len(variant.alternate_bases)
+    else:
+      left_sequence = reference_sequence_encoded[0]
+      right_sequence = ref_right_enc
+      left_shift = 0
+      right_shift = deletion_length
+      stitch_start = stitch_start_fwd
+      stitch_end = stitch_end_fwd
+    is_deletion = True
+
+  elif variant.is_insertion:
+    insertion_length = len(variant.alternate_bases) - len(
+        variant.reference_bases
+    )
+    raw_seq = fasta_extractor.extract(unstranded)
+    alt_raw = genome_io.insert_alternate_variant(raw_seq, unstranded, variant)
+    alt_right_raw = alt_raw[-interval_length:]
+    alt_right_enc = encoder.encode(alt_right_raw)
+    if interval.negative_strand:
+      alt_right_enc = alt_right_enc[::-1, ::-1]
+
+    stitch_start_fwd = (
+        variant.start + len(variant.reference_bases) - unstranded.start
+    )
+    stitch_end_fwd = (
+        variant.start - unstranded.start + len(variant.alternate_bases)
+    )
+
+    if interval.negative_strand:
+      left_sequence = alt_right_enc
+      right_sequence = alternate_sequence_encoded[0]
+      left_shift = insertion_length
+      right_shift = 0
+      stitch_start = seq_len - stitch_end_fwd
+      stitch_end = seq_len - stitch_start_fwd + len(variant.reference_bases)
+    else:
+      left_sequence = alternate_sequence_encoded[0]
+      right_sequence = alt_right_enc
+      left_shift = 0
+      right_shift = insertion_length
+      stitch_start = stitch_start_fwd
+      stitch_end = stitch_end_fwd
+    is_deletion = False
+  else:
+    raise ValueError(f'Unsupported variant type: {variant}')
+
+  return indel_stitch_utils.IndelStitchInput(
+      left_sequence=jnp.array(left_sequence)[np.newaxis],
+      right_sequence=jnp.array(right_sequence)[np.newaxis],
+      left_shift=jnp.array([[left_shift]], dtype=np.int32),
+      right_shift=jnp.array([[right_shift]], dtype=np.int32),
+      stitch_index=jnp.array([[stitch_end]], dtype=np.int32),
+      indel_start_index=jnp.array([[stitch_start]], dtype=np.int32),
+      is_deletion=jnp.array([is_deletion], dtype=bool),
+  )
+
+
 @typing.jaxtyped
 def _predict_variant(
     params: hk.Params,
@@ -200,6 +317,9 @@ def _predict_variant(
     requested_outputs: Collection[dna_output.OutputType],
     apply_fn: ApplyFn,
     junctions_apply_fn: JunctionsApplyFn,
+    trunk_apply_fn: TrunkApplyFn | None = None,
+    heads_apply_fn: HeadsApplyFn | None = None,
+    indel_stitch_input: indel_stitch_utils.IndelStitchInput | None = None,
     num_splice_sites: int,
     splice_site_threshold: float,
 ) -> tuple[
@@ -210,18 +330,101 @@ def _predict_variant(
   chex.assert_equal_shape([reference_sequences, alternate_sequences])
   sequence_length = reference_sequences.shape[1]
 
-  reference_predictions = apply_fn(
-      params,
-      state,
-      reference_sequences,
-      organism_indices,
-  )
-  alternate_predictions = apply_fn(
-      params,
-      state,
-      alternate_sequences,
-      organism_indices,
-  )
+  def _select(s, o, is_del):
+    mask = jnp.expand_dims(is_del, axis=range(1, s.ndim))
+    return jnp.where(mask, s, o)
+
+  if indel_stitch_input is not None:
+    if trunk_apply_fn is None or heads_apply_fn is None:
+      raise ValueError(
+          'Both trunk_apply_fn and heads_apply_fn must be provided when '
+          'indel_stitch_input is provided.'
+      )
+    left_embeddings = trunk_apply_fn(
+        params, state, indel_stitch_input.left_sequence, organism_indices
+    )
+    right_embeddings = trunk_apply_fn(
+        params, state, indel_stitch_input.right_sequence, organism_indices
+    )
+
+    stitched_embeddings_1bp = (
+        indel_stitch_utils.stitch_sequence_base_resolution(
+            left=left_embeddings.embeddings_1bp,
+            right=right_embeddings.embeddings_1bp,
+            left_shift=indel_stitch_input.left_shift,
+            right_shift=indel_stitch_input.right_shift,
+            stitch_index=indel_stitch_input.stitch_index,
+        )
+    )
+    base_res_length = left_embeddings.embeddings_1bp.shape[1]
+    embeddings_128bp_bin_size = (
+        base_res_length // left_embeddings.embeddings_128bp.shape[1]
+    )
+    stitched_embeddings_128bp = (
+        indel_stitch_utils.stitch_sequence_coarse_resolution(
+            left=left_embeddings.embeddings_128bp,
+            right=right_embeddings.embeddings_128bp,
+            left_shift=indel_stitch_input.left_shift,
+            right_shift=indel_stitch_input.right_shift,
+            stitch_index=indel_stitch_input.stitch_index,
+            indel_start_index=indel_stitch_input.indel_start_index,
+            bin_size=embeddings_128bp_bin_size,
+        )
+    )
+    embeddings_pair_bin_size = (
+        base_res_length // left_embeddings.embeddings_pair.shape[1]
+    )
+    stitched_embeddings_pair = indel_stitch_utils.stitch_2d_contact_maps(
+        left=left_embeddings.embeddings_pair,
+        right=right_embeddings.embeddings_pair,
+        left_shift=indel_stitch_input.left_shift,
+        right_shift=indel_stitch_input.right_shift,
+        stitch_index=indel_stitch_input.stitch_index,
+        indel_start_index=indel_stitch_input.indel_start_index,
+        bin_size=embeddings_pair_bin_size,
+    )
+
+    stitched_predictions = heads_apply_fn(
+        params,
+        state,
+        stitched_embeddings_1bp,
+        stitched_embeddings_128bp,
+        stitched_embeddings_pair,
+        organism_indices,
+    )
+
+    unstitched_sequence = jnp.where(
+        indel_stitch_input.is_deletion[:, None, None],
+        alternate_sequences,
+        reference_sequences,
+    )
+    unstitched_predictions = apply_fn(
+        params, state, unstitched_sequence, organism_indices
+    )
+
+    reference_predictions = jax.tree.map(
+        lambda s, o: _select(s, o, indel_stitch_input.is_deletion),
+        stitched_predictions,
+        unstitched_predictions,
+    )
+    alternate_predictions = jax.tree.map(
+        lambda s, o: _select(o, s, indel_stitch_input.is_deletion),
+        stitched_predictions,
+        unstitched_predictions,
+    )
+  else:
+    reference_predictions = apply_fn(
+        params,
+        state,
+        reference_sequences,
+        organism_indices,
+    )
+    alternate_predictions = apply_fn(
+        params,
+        state,
+        alternate_sequences,
+        organism_indices,
+    )
   reference_splice_sites = (
       reference_predictions['splice_sites_classification']['predictions']
       * splice_junction_masks.reference_genes
@@ -371,6 +574,8 @@ class AlphaGenomeModel(dna_model.DnaModel):
       state: hk.State,
       apply_fn: ApplyFn,
       junctions_apply_fn: JunctionsApplyFn,
+      trunk_apply_fn: TrunkApplyFn | None = None,
+      heads_apply_fn: HeadsApplyFn | None = None,
       metadata: Mapping[dna_model.Organism, AlphaGenomeOutputMetadata],
       fasta_extractors: (
           Mapping[dna_model.Organism, fasta.FastaExtractor] | None
@@ -383,6 +588,7 @@ class AlphaGenomeModel(dna_model.DnaModel):
       pas_gtfs: Mapping[dna_model.Organism, pd.DataFrame] | None = None,
       num_splice_sites: int = 512,
       splice_site_threshold: float = 0.1,
+      enable_indel_stitching: bool = True,
       calibration_scorers: (
           Mapping[dna_model.Organism, calibration.CalibrationScorer] | None
       ) = None,
@@ -398,6 +604,11 @@ class AlphaGenomeModel(dna_model.DnaModel):
       junctions_apply_fn: A function that takes model parameters, state,
         embeddings and splice site positions; and returns the model's junctions
         predictions.
+      trunk_apply_fn: A function that takes model parameters, state, DNA
+        sequence, and organism index; and returns the model trunk's embeddings.
+      heads_apply_fn: A function that takes model parameters, state, trunk
+        embeddings, sequence embeddings, junction predictions, and organism
+        index; and returns predictions from the heads.
       metadata: A mapping of organism to OutputMetadata.
       fasta_extractors: Optional mapping of organism to FastaExtractor. If not
         provided, functions that require sequence extraction will fail.
@@ -412,6 +623,8 @@ class AlphaGenomeModel(dna_model.DnaModel):
       num_splice_sites: The maximum number of splice sites that are extracted
         from the splice site classification predictions.
       splice_site_threshold: The threshold to use for splice site prediction.
+      enable_indel_stitching: Whether to enable indel stitching for variant
+        scoring on indels. See `indel_stitch_utils.py` for more details.
       calibration_scorers: Optional mapping of organism to CalibrationScorer. If
         not provided, calibration will not be available.
       device: Optional device to use for model prediction. If None, the first
@@ -432,7 +645,10 @@ class AlphaGenomeModel(dna_model.DnaModel):
     self._one_hot_encoder = one_hot_encoder.DNAOneHotEncoder()
     self._fasta_extractors = fasta_extractors or {}
     self._splice_site_extractors = splice_site_extractors or {}
+    self._enable_indel_stitching = enable_indel_stitching
     self._calibration_scorers = calibration_scorers or {}
+    self._trunk_apply_fn = trunk_apply_fn
+    self._heads_apply_fn = heads_apply_fn
 
     self._predict = jax.jit(
         functools.partial(_predict, apply_fn=apply_fn),
@@ -443,6 +659,8 @@ class AlphaGenomeModel(dna_model.DnaModel):
             _predict_variant,
             apply_fn=jax.jit(apply_fn),
             junctions_apply_fn=jax.jit(junctions_apply_fn),
+            trunk_apply_fn=jax.jit(trunk_apply_fn) if trunk_apply_fn else None,
+            heads_apply_fn=jax.jit(heads_apply_fn) if heads_apply_fn else None,
             num_splice_sites=num_splice_sites,
             splice_site_threshold=splice_site_threshold,
         ),
@@ -695,18 +913,34 @@ class AlphaGenomeModel(dna_model.DnaModel):
         ),
     )
 
-    with self._device_context as device, jax.transfer_guard('disallow'):
-      reference_sequence = jax.device_put(
-          np.asarray(self._one_hot_encoder.encode(reference_sequence))[
-              np.newaxis
-          ],
-          device,
+    reference_sequence_encoded = np.asarray(
+        self._one_hot_encoder.encode(reference_sequence)
+    )[np.newaxis]
+    alternate_sequence_encoded = np.asarray(
+        self._one_hot_encoder.encode(alternate_sequence)
+    )[np.newaxis]
+
+    indel_stitch_input = None
+    if (
+        self._trunk_apply_fn is not None
+        and self._heads_apply_fn is not None
+        and (variant.is_deletion or variant.is_insertion)
+    ):
+      indel_stitch_input = _extract_indel_stitch_input_single(
+          variant,
+          interval,
+          self._get_fasta_extractor(organism),
+          self._one_hot_encoder,
+          reference_sequence_encoded,
+          alternate_sequence_encoded,
       )
-      alternate_sequence = jax.device_put(
-          np.asarray(self._one_hot_encoder.encode(alternate_sequence))[
-              np.newaxis
-          ],
-          device,
+
+    with self._device_context as device, jax.transfer_guard('disallow'):
+      reference_sequence_dev = jax.device_put(
+          reference_sequence_encoded, device
+      )
+      alternate_sequence_dev = jax.device_put(
+          alternate_sequence_encoded, device
       )
       organism_indices = jax.device_put(
           np.full((1,), convert_to_organism_index(organism), dtype=np.int32),
@@ -716,8 +950,8 @@ class AlphaGenomeModel(dna_model.DnaModel):
       reference_predictions, alt_predictions = self._predict_variant(
           self._params,
           self._state,
-          reference_sequence,
-          alternate_sequence,
+          reference_sequence_dev,
+          alternate_sequence_dev,
           jax.device_put(splice_junction_masks, device),
           organism_indices,
           requested_outputs=requested_outputs,
@@ -725,6 +959,9 @@ class AlphaGenomeModel(dna_model.DnaModel):
               np.asarray([interval.negative_strand]), device
           ),
           strand_reindexing=jax.device_put(metadata.strand_reindexing, device),
+          indel_stitch_input=jax.device_put(indel_stitch_input, device)
+          if indel_stitch_input
+          else None,
       )
       reference_predictions, alt_predictions = _filter_variant_predictions(
           reference_predictions,
@@ -900,6 +1137,22 @@ class AlphaGenomeModel(dna_model.DnaModel):
     )
     calibration_scorer = self._calibration_scorers.get(organism)
 
+    indel_stitch_input = None
+    if (
+        self._enable_indel_stitching
+        and self._trunk_apply_fn is not None
+        and self._heads_apply_fn is not None
+        and (variant.is_deletion or variant.is_insertion)
+    ):
+      indel_stitch_input = _extract_indel_stitch_input_single(
+          variant,
+          interval,
+          self._get_fasta_extractor(organism),
+          self._one_hot_encoder,
+          reference_sequence,
+          alternate_sequence,
+      )
+
     with self._device_context as device, jax.transfer_guard('disallow'):
 
       reference_predictions, alternate_predictions = self._predict_variant(
@@ -916,6 +1169,9 @@ class AlphaGenomeModel(dna_model.DnaModel):
           strand_reindexing=jax.device_put(
               track_metadata.strand_reindexing, device
           ),
+          indel_stitch_input=jax.device_put(indel_stitch_input, device)
+          if indel_stitch_input
+          else None,
       )
       reference_predictions, alternate_predictions = (
           _filter_variant_predictions(
@@ -1131,6 +1387,8 @@ class ModelSettings:
   num_splice_sites: int = 512
   # The threshold to use for splice site prediction.
   splice_site_threshold: float = 0.1
+  # Whether to use indel stitching.
+  enable_indel_stitching: bool = True
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -1439,10 +1697,12 @@ def create(
           settings.calibration_path
       )
 
-  init_fn, apply_fn, _, _, junctions_apply_fn = create_model(
-      metadata,
-      num_splice_sites=model_settings.num_splice_sites,
-      splice_site_threshold=model_settings.splice_site_threshold,
+  init_fn, apply_fn, trunk_apply_fn, heads_apply_fn, junctions_apply_fn = (
+      create_model(
+          metadata,
+          num_splice_sites=model_settings.num_splice_sites,
+          splice_site_threshold=model_settings.splice_site_threshold,
+      )
   )
 
   dna_sequence_shape = jax.ShapeDtypeStruct((1, 2048, 4), dtype=jnp.float32)
@@ -1462,6 +1722,8 @@ def create(
       state=state,
       apply_fn=apply_fn,
       junctions_apply_fn=junctions_apply_fn,
+      trunk_apply_fn=trunk_apply_fn,
+      heads_apply_fn=heads_apply_fn,
       metadata=metadata,
       fasta_extractors=fasta_extractors,
       splice_site_extractors=splice_site_extractors,
@@ -1469,6 +1731,7 @@ def create(
       pas_gtfs=pas_gtfs,
       num_splice_sites=model_settings.num_splice_sites,
       splice_site_threshold=model_settings.splice_site_threshold,
+      enable_indel_stitching=model_settings.enable_indel_stitching,
       calibration_scorers=calibration_scorers,
       device=device,
   )
