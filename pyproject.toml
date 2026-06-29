@@ -34,7 +34,7 @@ dependencies=[
     # keep-sorted start
     'absl-py',
     'aiohttp',
-    'alphagenome',
+    'alphagenome>=0.7.0',
     'anndata',
     'chex',
     'dm-haiku',

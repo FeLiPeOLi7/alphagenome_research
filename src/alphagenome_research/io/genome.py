@@ -15,7 +15,7 @@
 """Utilities for working with genome-related objects such as intervals."""
 
 from alphagenome.data import genome
-from alphagenome_research.io import fasta
+from alphagenome.io import fasta
 
 
 def insert_reference_variant(

@@ -17,9 +17,9 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from alphagenome.data import genome
+from alphagenome.io import fasta
 from alphagenome.models import dna_client
 from alphagenome_research.finetuning import dataset
-from alphagenome_research.io import fasta
 from alphagenome_research.model.metadata import metadata as metadata_lib
 import chex
 import numpy as np

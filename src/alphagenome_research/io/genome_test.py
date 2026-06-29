@@ -17,7 +17,7 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from alphagenome.data import genome
-from alphagenome_research.io import fasta
+from alphagenome.io import fasta
 from alphagenome_research.io import genome as genome_io
 
 

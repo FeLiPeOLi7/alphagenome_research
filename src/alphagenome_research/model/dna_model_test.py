@@ -20,10 +20,10 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from alphagenome.data import genome
 from alphagenome.data import ontology
+from alphagenome.io import fasta
 from alphagenome.models import dna_output
 from alphagenome.models import interval_scorers
 from alphagenome.models import variant_scorers
-from alphagenome_research.io import fasta
 from alphagenome_research.io import splicing
 from alphagenome_research.model import dna_model
 from alphagenome_research.model import embeddings
@@ -89,11 +89,6 @@ def _create_polya_df_gtf() -> pd.DataFrame:
       'pas_gene_id': ['G1', 'G1', 'G2', 'G2'],
       'Chromosome': 'chr1',
   })
-
-
-def _get_test_fasta_path() -> str | os.PathLike[str]:
-  root_dir = pathlib.Path(__file__).parent.parent
-  return root_dir / 'io' / 'testdata' / 'example.fa'
 
 
 class DnaModelTest(parameterized.TestCase):
@@ -914,6 +909,13 @@ class DnaModelTest(parameterized.TestCase):
     checkpointer = ocp.StandardCheckpointer()
     checkpoint_dir = os.path.join(self.create_tempdir().full_path, 'ckpt')
     checkpointer.save(checkpoint_dir, (params, state))
+
+    fasta_path = pathlib.Path(
+        os.path.join(self.create_tempdir().full_path, 'example.fa')
+    )
+    fasta_path.write_bytes(b'>chr1\nAAAA')
+    pathlib.Path(str(fasta_path) + '.fai').touch()
+
     gtf_path = os.path.join(self.create_tempdir().full_path, 'hg38.feather')
     _create_mock_gtf().to_feather(gtf_path)
     polya_gtf_path = os.path.join(
@@ -940,7 +942,7 @@ class DnaModelTest(parameterized.TestCase):
         checkpoint_dir,
         organism_settings={
             dna_model.Organism.HOMO_SAPIENS: dna_model.OrganismSettings(
-                fasta_path=_get_test_fasta_path(),
+                fasta_path=str(fasta_path),
                 gtf_feather_path=gtf_path,
                 pas_feather_path=polya_gtf_path,
                 splice_site_starts_feather_path=splice_starts_path,
