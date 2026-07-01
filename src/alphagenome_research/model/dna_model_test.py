@@ -732,6 +732,7 @@ class DnaModelTest(parameterized.TestCase):
     ]
     if with_calibration:
       expected_columns.append('quantile_score')
+    self.assertIsNotNone(df)
     self.assertCountEqual(expected_columns, df.columns)
 
   def test_missing_gtf_raises_scorer_missing_error(self):
