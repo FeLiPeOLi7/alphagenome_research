@@ -47,7 +47,7 @@ dependencies=[
     'numpy',
     'optax',
     'orbax-checkpoint',
-    'pandas',
+    'pandas<3', # Pandas 3.0 seems to break compatibility with pyranges.
     'protobuf',
     'pyBigWig',
     'pyarrow',

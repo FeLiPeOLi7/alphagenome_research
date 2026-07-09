@@ -189,9 +189,9 @@ class GeneVariantScorer(
     output_metadata = track_metadata.get(settings.requested_output)
     assert isinstance(output_metadata, track_data.TrackMetadata)
     strand_mask = (
-        np.asarray(mask_metadata['strand'].values)[:, None]
-        == output_metadata['strand'].values[None]
-    ) | (output_metadata['strand'].values[None] == '.')
+        np.asarray(mask_metadata['strand'].to_numpy())[:, None]
+        == output_metadata['strand'].to_numpy()[None]
+    ) | (output_metadata['strand'].to_numpy()[None] == '.')
     num_genes = len(mask_metadata)
     scores = np.where(strand_mask, scores['score'][:num_genes], np.nan)
     return variant_scoring.create_anndata(
