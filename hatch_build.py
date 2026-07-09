@@ -47,6 +47,7 @@ class GenerateProtos(interface.BuildHookInterface):
           f'--proto_path={_ROOT_DIR}',
           f'--proto_path={alphagenome_package_root_dir}',
           f'--python_out={_ROOT_DIR}',
+          f'--pyi_out={_ROOT_DIR}',
           os.path.join(_ROOT_DIR, proto_path),
       ]
       if protoc.main(proto_args) != 0:
