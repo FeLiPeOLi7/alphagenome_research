@@ -28,6 +28,7 @@ from alphagenome_research.model import splicing
 from alphagenome_research.model.metadata import metadata as metadata_lib
 import haiku as hk
 import jax
+import jax.numpy as jnp
 from jaxtyping import Array, Float, Int, PyTree, Shaped  # pylint: disable=g-importing-member, g-multiple-import
 
 
@@ -251,7 +252,7 @@ class AlphaGenome(hk.Module):
       organism_index: Int[Array, 'B'],
   ) -> PyTree[Float[Array, 'B ...']]:
     """Computes predictions for various heads from embeddings."""
-    predictions = {
+    predictions: PyTree[Float[Array, 'B ...']] = {
         'embeddings_1bp': embeddings.embeddings_1bp,
     }
     with hk.name_scope('head'):
@@ -286,6 +287,7 @@ class AlphaGenome(hk.Module):
           pad_to_length=self._num_splice_sites,
           threshold=self._splice_site_threshold,
       )
+      assert isinstance(embeddings.embeddings_1bp, Array)
       predictions[junction_head.value] = self.predict_junctions(
           embeddings.embeddings_1bp, splice_site_positions, organism_index
       )
@@ -318,7 +320,10 @@ class AlphaGenome(hk.Module):
       Float[Array, ''], PyTree[Float[Array, '']], PyTree[Shaped[Array, 'B ...']]
   ]:
     """Returns the loss for the model."""
-    predictions, _ = self(batch.dna_sequence, batch.get_organism_index())
+    predictions, _ = self(
+        jnp.asarray(batch.dna_sequence, copy=False),
+        jnp.asarray(batch.get_organism_index(), copy=False),
+    )
     total_loss, all_scalars = 0.0, {}
     for head_name, head_fn in self._heads.items():
       scalars = head_fn.loss(predictions[head_name.value], batch)
@@ -326,4 +331,4 @@ class AlphaGenome(hk.Module):
           {f'{head_name.value}_{k}': v for k, v in scalars.items()}
       )
       total_loss += self._head_configs[head_name].loss_weight * scalars['loss']
-    return total_loss, all_scalars, predictions
+    return jnp.asarray(total_loss), all_scalars, predictions

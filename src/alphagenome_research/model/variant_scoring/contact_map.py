@@ -124,7 +124,5 @@ class ContactMapScorer(variant_scoring.VariantScorer):
 
     num_tracks = len(output_metadata)
     return variant_scoring.create_anndata(
-        scores['score'][np.newaxis, :num_tracks],
-        obs=None,
-        var=track_metadata.get(settings.requested_output),
+        scores['score'][np.newaxis, :num_tracks], obs=None, var=output_metadata
     )

@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping
 import dataclasses
+import os
 
 from alphagenome import typing
 from alphagenome.models import track_data_utils
@@ -167,7 +168,7 @@ class CalibrationScorer:
 
 
 def load(
-    path: str, *, rng: np.random.Generator | None = None
+    path: str | os.PathLike[str], *, rng: np.random.Generator | None = None
 ) -> CalibrationScorer:
   """Reads calibration scores from a path."""
   scores = calibration_scores_pb2.CalibrationScores.FromString(

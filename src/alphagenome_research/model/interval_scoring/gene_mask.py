@@ -119,7 +119,7 @@ class GeneIntervalScorer(
         output = jnp.einsum('lt,lg->gt', tracks, masks)
       case _:
         raise ValueError(
-            f'Unsupported aggregation type: {self._aggregation_type}.'
+            f'Unsupported aggregation type: {settings.aggregation_type}.'
         )
 
     return {'score': output}

@@ -31,11 +31,12 @@ from alphagenome_research.model import embeddings as embeddings_module
 from alphagenome_research.model import losses
 from alphagenome_research.model import schemas
 from alphagenome_research.model.metadata import metadata as metadata_lib
+from alphagenome_research.typing import ArrayType  # pylint: disable=g-importing-member
 import chex
 import haiku as hk
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, ArrayLike, Bool, Float, Int, PyTree, Shaped  # pylint: disable=g-importing-member, g-multiple-import
+from jaxtyping import Array, Bool, Float, Int, PyTree, Shaped  # pylint: disable=g-importing-member, g-multiple-import
 import numpy as np
 
 _SOFT_CLIP_VALUE = 10.0
@@ -250,8 +251,8 @@ def _sum_pool(
 
 @typing.jaxtyped
 def _get_param_for_index(
-    params: Shaped[ArrayLike, 'P ...'], index: Int[Array, 'B']
-) -> Shaped[ArrayLike, 'B ...']:
+    params: Shaped[ArrayType, 'P ...'], index: Int[ArrayType, 'B']
+) -> Shaped[ArrayType, 'B ...']:
   """Returns a parameter for a specific index.
 
   Embeds the params into the graph.
@@ -296,12 +297,12 @@ class _MultiOrganismLinear(hk.Module):
 
 
 def predictions_scaling(
-    x: Float[ArrayLike, 'B S C'],
-    track_means: Float[ArrayLike, 'B C'],
+    x: Float[ArrayType, 'B S C'],
+    track_means: Float[ArrayType, 'B C'],
     resolution: int,
     apply_squashing: bool,
     soft_clip_value: float = _SOFT_CLIP_VALUE,
-) -> Float[ArrayLike, 'S C']:
+) -> Float[ArrayType, 'S C']:
   """Scales predictions to experimental data scale.
 
   Args:
@@ -328,12 +329,12 @@ def predictions_scaling(
 
 @typing.jaxtyped
 def targets_scaling(
-    targets: Float[ArrayLike, 'B S C'],
-    track_means: Float[ArrayLike, 'B C'],
+    targets: Float[ArrayType, 'B S C'],
+    track_means: Float[ArrayType, 'B C'],
     resolution: int,
     apply_squashing: bool,
     soft_clip_value: float = _SOFT_CLIP_VALUE,
-) -> Float[Array, 'B S C']:
+) -> Float[ArrayType, 'B S C']:
   """Scales experimental targets to the model prediction space.
 
   Args:
@@ -611,12 +612,13 @@ class GenomeTracksHead(Head):
       resolution: The resolution of the predictions.
     """
     track_means = _get_param_for_index(self._track_means, organism_index)
-    return predictions_scaling(
+    unscaled_predictions = predictions_scaling(
         x,
         track_means=track_means,
         resolution=resolution,
         apply_squashing=self._apply_squashing,
     )
+    return jnp.asarray(unscaled_predictions, copy=False)
 
   @typing.jaxtyped
   def scale(
@@ -627,12 +629,13 @@ class GenomeTracksHead(Head):
   ) -> Float[Array, 'B S C']:
     """Scales targets to model predictions scale."""
     track_means = _get_param_for_index(self._track_means, organism_index)
-    return targets_scaling(
+    scaled_targets = targets_scaling(
         x,
         track_means=track_means,
         resolution=resolution,
         apply_squashing=self._apply_squashing,
     )
+    return jnp.asarray(scaled_targets, copy=False)
 
   @hk.transparent
   @typing.jaxtyped
@@ -674,7 +677,7 @@ class GenomeTracksHead(Head):
       organism_index: Int[Array, 'B'],
       predictions: Float[Array, 'B S C'],
       targets: Float[Array, 'B S C'],
-      targets_mask: Bool[Array, 'B 1 C'] | None,
+      targets_mask: Bool[Array, 'B 1 C'],
       resolution: int,
       gene_mask: Bool[Array, 'B S 2 G'] | None = None,
   ) -> PyTree[Float[Array, '']]:
@@ -823,7 +826,10 @@ class GenomeTracksHead(Head):
     if self._bundle is None:
       raise ValueError('Bundle is required for loss computation.')
 
-    tracks, mask = batch.get_genome_tracks(self._bundle)
+    tracks, mask = jax.tree.map(
+        lambda x: jnp.asarray(x, copy=False),
+        batch.get_genome_tracks(self._bundle),
+    )
 
     if mask.shape[-2] != 1:
       raise ValueError(
@@ -842,13 +848,19 @@ class GenomeTracksHead(Head):
       else:
         targets = _sum_pool(tracks, resolution)
 
+      gene_mask = (
+          jnp.asarray(batch.gene_mask, copy=False)
+          if resolution == 1 and batch.gene_mask is not None
+          else None
+      )
+
       all_losses = self._compute_loss(
-          organism_index=batch.get_organism_index(),
+          organism_index=jnp.asarray(batch.get_organism_index(), copy=False),
           predictions=predictions_for_resolution,
           targets=targets,
           targets_mask=mask,
           resolution=resolution,
-          gene_mask=batch.gene_mask if resolution == 1 else None,
+          gene_mask=gene_mask,
       )
       for k, v in all_losses.items():
         scalars[f'{k}_{resolution}bp'] = v
@@ -880,9 +892,9 @@ class ContactMapsHead(Head):
       **kwargs,
   ) -> PyTree[Float[Array, 'B ...'] | None]:
     """Predicts contact maps from embeddings."""
-    return {
-        'predictions': self._predict(embeddings.embeddings_pair, organism_index)
-    }
+    pair_embeddings = embeddings.embeddings_pair
+    assert pair_embeddings is not None
+    return {'predictions': self._predict(pair_embeddings, organism_index)}
 
   def _get_targets_mask(
       self,
@@ -905,7 +917,9 @@ class ContactMapsHead(Head):
     chex.assert_equal_shape([contact_predictions, targets])
 
     # Mask out NaN targets (which happens when balancing a missing slice).
-    targets_mask = self._get_targets_mask(batch.get_organism_index())
+    targets_mask = self._get_targets_mask(
+        jnp.asarray(batch.get_organism_index(), copy=False)
+    )
     targets_mask = jnp.where(jnp.isnan(targets), False, targets_mask)
     targets = jnp.where(jnp.isnan(targets), 0.0, targets)
 
@@ -951,12 +965,15 @@ class SpliceSitesClassificationHead(Head):
     logits = predictions['logits']
     chex.assert_equal_shape([splice_sites, logits])
 
+    # Label smoothing with FP32 machine precision (~1e-7) for 5 classes.
+    y_true = (1.0 - 1e-7) * jnp.asarray(splice_sites, copy=False).astype(
+        jnp.float32
+    ) + 1e-7 / self.num_tracks
+
     classification_mask = jnp.any(splice_sites, axis=-1, keepdims=True)
     loss = losses.cross_entropy_loss_from_logits(
         y_pred_logits=logits,
-        # Label smoothing with FP32 machine precision (~1e-7) for 5 classes.
-        y_true=(1.0 - 1e-7) * splice_sites.astype(jnp.float32)
-        + 1e-7 / self.num_tracks,
+        y_true=y_true,
         mask=classification_mask,
         axis=-1,
     )
@@ -1012,7 +1029,9 @@ class SpliceSitesUsageHead(Head):
     loss = losses.binary_crossentropy_from_logits(
         y_pred=logits,
         y_true=jnp.clip(splice_site_usage, 1e-7, 1.0 - 1e-7),
-        mask=self._get_targets_mask(batch.get_organism_index()),
+        mask=self._get_targets_mask(
+            jnp.asarray(batch.get_organism_index(), copy=False)
+        ),
     )
     return {'loss': loss}
 
@@ -1196,6 +1215,8 @@ class SpliceSitesJunctionHead(Head):
     """Returns the loss for the head."""
     if (count_target := batch.splice_junctions) is None:
       raise ValueError('splice_junctions target not in batch.')
+
+    count_target = jnp.asarray(count_target, copy=False)
 
     pred_pair = predictions['predictions']
     pairs_mask = predictions['splice_junction_mask']

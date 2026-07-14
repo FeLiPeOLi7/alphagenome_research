@@ -16,19 +16,19 @@
 
 import abc
 from collections.abc import Mapping
-from typing import Generic, Self, TypeVar
+from typing import Generic, TypeVar
 
 from alphagenome import typing
 from alphagenome.data import genome
 from alphagenome.models import dna_output
+from alphagenome_research.typing import ArrayType  # pylint: disable=g-importing-member
 import anndata
 import chex
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, ArrayLike, Bool, Float32, Int32, PyTree  # pylint: disable=g-multiple-import, g-importing-member
+from jaxtyping import Array, Bool, Float32, Int32, PyTree  # pylint: disable=g-multiple-import, g-importing-member
 import numpy as np
 import pandas as pd
-
 
 VariantMaskT = TypeVar('VariantMaskT')
 VariantMetadataT = TypeVar('VariantMetadataT')
@@ -185,19 +185,19 @@ class IndelMask:
   having a batch dimension and the latter having one.
   """
 
-  variant_is_indel: Bool[ArrayLike, '*B 1']
-  variant_alt_mask: Bool[ArrayLike, '*B S']
-  variant_deletion_reindex_mask: Int32[ArrayLike, '*B S']
-  variant_deletion_zeros_mask: Bool[ArrayLike, '*B S']
-  variant_insertion_crop_mask: Bool[ArrayLike, '*B S']
-  variant_insertion_reindex_mask: Int32[ArrayLike, '*B S']
+  variant_is_indel: Bool[ArrayType, '*B 1']
+  variant_alt_mask: Bool[ArrayType, '*B S']
+  variant_deletion_reindex_mask: Int32[ArrayType, '*B S']
+  variant_deletion_zeros_mask: Bool[ArrayType, '*B S']
+  variant_insertion_crop_mask: Bool[ArrayType, '*B S']
+  variant_insertion_reindex_mask: Int32[ArrayType, '*B S']
 
   @classmethod
   def from_variant(
       cls,
       variant: genome.Variant,
       interval: genome.Interval,
-  ) -> Self:
+  ) -> 'IndelMask':
     """Returns the indel alignment masks for the given variant and interval.
 
     Args:
@@ -286,7 +286,7 @@ class IndelMask:
       return indel_mask.reverse_complement()
     return indel_mask
 
-  def reverse_complement(self) -> Self:
+  def reverse_complement(self) -> 'IndelMask':
     """Reverse complements the IndelMask."""
     interval_width = self.variant_alt_mask.shape[-1]
     return IndelMask(

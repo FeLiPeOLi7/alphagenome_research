@@ -33,8 +33,12 @@ class Embeddings:
 
   def get_sequence_embeddings(self, resolution: int) -> Float[Array, 'B S D']:
     if resolution == 128:
+      if self.embeddings_128bp is None:
+        raise ValueError('Embeddings_128bp is None.')
       return self.embeddings_128bp
     elif resolution == 1:
+      if self.embeddings_1bp is None:
+        raise ValueError('Embeddings_1bp is None.')
       return self.embeddings_1bp
     else:
       raise ValueError(f'Unsupported resolution: {resolution}')

@@ -51,13 +51,14 @@ from alphagenome_research.model.variant_scoring import polyadenylation
 from alphagenome_research.model.variant_scoring import splice_junction
 from alphagenome_research.model.variant_scoring import variant_scoring
 from alphagenome_research.model.variant_scoring.calibration import calibration
+from alphagenome_research.typing import ArrayType  # pylint: disable=g-importing-member
 import anndata
 import chex
 import haiku as hk
 import huggingface_hub
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, ArrayLike, Bool, Float, Float32, Int32, PyTree, Shaped  # pylint: disable=g-importing-member, g-multiple-import
+from jaxtyping import Array, Bool, Float, Float32, Int32, PyTree, Shaped  # pylint: disable=g-importing-member, g-multiple-import
 import jmp
 import kagglehub
 from kagglehub import auth as kaggle_auth
@@ -178,8 +179,8 @@ def extract_predictions(
 class _SpliceJunctionVariantMasks:
   """Container for splicing masks used by predict_variant."""
 
-  splice_sites: Bool[ArrayLike, 'B S 5'] | None
-  reference_genes: Bool[ArrayLike, 'B S 1']
+  splice_sites: Bool[ArrayType, 'B S 5'] | None
+  reference_genes: Bool[ArrayType, 'B S 1']
   indel_masks: variant_scoring.IndelMask
 
 
@@ -212,8 +213,8 @@ def _extract_indel_stitch_input_single(
     interval: genome.Interval,
     fasta_extractor: fasta.FastaExtractor,
     encoder: one_hot_encoder.DNAOneHotEncoder,
-    reference_sequence_encoded: Float32[ArrayLike, 'B S 4'],
-    alternate_sequence_encoded: Float32[ArrayLike, 'B S 4'],
+    reference_sequence_encoded: Float32[ArrayType, 'B S 4'],
+    alternate_sequence_encoded: Float32[ArrayType, 'B S 4'],
 ) -> indel_stitch_utils.IndelStitchInput | None:
   """Extracts IndelStitchInput for a single variant."""
   if not variant.is_deletion and not variant.is_insertion:
@@ -347,6 +348,8 @@ def _predict_variant(
         params, state, indel_stitch_input.right_sequence, organism_indices
     )
 
+    assert isinstance(left_embeddings.embeddings_1bp, Array)
+    assert isinstance(right_embeddings.embeddings_1bp, Array)
     stitched_embeddings_1bp = (
         indel_stitch_utils.stitch_sequence_base_resolution(
             left=left_embeddings.embeddings_1bp,
@@ -357,6 +360,9 @@ def _predict_variant(
         )
     )
     base_res_length = left_embeddings.embeddings_1bp.shape[1]
+
+    assert isinstance(left_embeddings.embeddings_128bp, Array)
+    assert isinstance(right_embeddings.embeddings_128bp, Array)
     embeddings_128bp_bin_size = (
         base_res_length // left_embeddings.embeddings_128bp.shape[1]
     )
@@ -371,6 +377,8 @@ def _predict_variant(
             bin_size=embeddings_128bp_bin_size,
         )
     )
+    assert isinstance(left_embeddings.embeddings_pair, Array)
+    assert isinstance(right_embeddings.embeddings_pair, Array)
     embeddings_pair_bin_size = (
         base_res_length // left_embeddings.embeddings_pair.shape[1]
     )
@@ -459,7 +467,7 @@ def _predict_variant(
   ref_and_alt_splice_site_positions = splicing.generate_splice_site_positions(
       ref=reference_splice_sites,
       alt=alternate_splice_sites,
-      splice_sites=splice_junction_masks.splice_sites,
+      splice_sites=jnp.asarray(splice_junction_masks.splice_sites, copy=False),
       k=num_splice_sites,
       pad_to_length=num_splice_sites,
       threshold=splice_site_threshold,
@@ -546,6 +554,21 @@ def _filter_variant_predictions(
       _filter_predictions(reference_predictions, track_masks=track_masks),
       _filter_predictions(alternate_predictions, track_masks=track_masks),
   )
+
+
+def _convert_ontology_terms(
+    ontology_terms: Iterable[ontology.OntologyTerm | str] | None,
+) -> Sequence[ontology.OntologyTerm] | None:
+  """Convert ontology terms or curies to unique list of OntologyTerms."""
+  if ontology_terms is None:
+    return None
+  result = []
+  for term in dict.fromkeys(ontology_terms):
+    if isinstance(term, str):
+      result.append(ontology.from_curie(term))
+    else:
+      result.append(term)
+  return result
 
 
 class _DeviceContextManager:
@@ -688,9 +711,7 @@ class AlphaGenomeModel(dna_model.DnaModel):
     self._gene_mask_extractors = {}
 
     for organism in metadata.keys():
-      self._variant_scorers[organism]: dict[
-          variant_scorers_lib.BaseVariantScorer, variant_scoring.VariantScorer
-      ] = {
+      self._variant_scorers[organism] = {
           variant_scorers_lib.BaseVariantScorer.CENTER_MASK: (
               center_mask.CenterMaskVariantScorer()
           ),
@@ -774,11 +795,7 @@ class AlphaGenomeModel(dna_model.DnaModel):
   ) -> dna_output.Output:
     """Predicts the sequence."""
     requested_outputs = tuple(set(requested_outputs))
-    if ontology_terms is not None:
-      ontology_terms = set(
-          ontology.from_curie(o) if isinstance(o, str) else o
-          for o in ontology_terms
-      )
+    ontology_terms = _convert_ontology_terms(ontology_terms)
     metadata = self._metadata[organism]
     track_masks = metadata_lib.create_track_masks(
         metadata,
@@ -823,11 +840,7 @@ class AlphaGenomeModel(dna_model.DnaModel):
       ontology_terms: Iterable[ontology.OntologyTerm | str] | None,
   ) -> dna_output.Output:
     requested_outputs = tuple(set(requested_outputs))
-    if ontology_terms is not None:
-      ontology_terms = set(
-          ontology.from_curie(o) if isinstance(o, str) else o
-          for o in ontology_terms
-      )
+    ontology_terms = _convert_ontology_terms(ontology_terms)
     sequence = self._get_fasta_extractor(organism).extract(interval)
     metadata = self._metadata[organism]
     track_masks = metadata_lib.create_track_masks(
@@ -876,11 +889,7 @@ class AlphaGenomeModel(dna_model.DnaModel):
       ontology_terms: Iterable[ontology.OntologyTerm | str] | None,
   ) -> dna_output.VariantOutput:
     requested_outputs = tuple(set(requested_outputs))
-    if ontology_terms is not None:
-      ontology_terms = set(
-          ontology.from_curie(o) if isinstance(o, str) else o
-          for o in ontology_terms
-      )
+    ontology_terms = _convert_ontology_terms(ontology_terms)
     reference_sequence, alternate_sequence = (
         genome_io.extract_variant_sequences(
             interval, variant, self._get_fasta_extractor(organism)
@@ -1335,7 +1344,7 @@ def _construct_output_from_predictions(
             interval,
         )
     )
-    chromosome = interval.chromosome if interval is not None else None
+    chromosome = interval.chromosome if interval is not None else ''
     junctions = [
         genome.Junction(chromosome, start, end, strand)
         for start, end, strand in zip(starts, ends, strands)
@@ -1682,6 +1691,7 @@ def create(
     if settings.pas_feather_path is not None:
       pas_gtfs[organism] = pd.read_feather(settings.pas_feather_path)
     if settings.splice_site_starts_feather_path is not None:
+      assert settings.splice_site_ends_feather_path is not None
       splice_site_extractors[organism] = (
           splicing_io.SpliceSiteAnnotationExtractor(
               junction_starts=pd.read_feather(

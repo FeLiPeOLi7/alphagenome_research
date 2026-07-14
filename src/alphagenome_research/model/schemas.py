@@ -16,8 +16,9 @@
 
 from alphagenome import typing
 from alphagenome_research.io import bundles
+from alphagenome_research.typing import ArrayType  # pylint: disable=g-importing-member
 import chex
-from jaxtyping import ArrayLike, Bool, Float, Int  # pylint: disable=g-importing-member, g-multiple-import
+from jaxtyping import Bool, Float, Int  # pylint: disable=g-importing-member, g-multiple-import
 
 
 @typing.jaxtyped
@@ -25,33 +26,33 @@ from jaxtyping import ArrayLike, Bool, Float, Int  # pylint: disable=g-importing
 class DataBatch:
   """Input batch for the model."""
 
-  dna_sequence: Float[ArrayLike, 'B S_DNA 4'] | None = None
-  organism_index: Int[ArrayLike, 'B'] | None = None
-  atac: Float[ArrayLike, 'B S C_ATAC'] | None = None
-  atac_mask: Bool[ArrayLike, 'B #S C_ATAC'] | None = None
-  dnase: Float[ArrayLike, 'B S C_DNASE'] | None = None
-  dnase_mask: Bool[ArrayLike, 'B #S C_DNASE'] | None = None
-  procap: Float[ArrayLike, 'B S C_PROCAP'] | None = None
-  procap_mask: Bool[ArrayLike, 'B #S C_PROCAP'] | None = None
-  chip_histone: Float[ArrayLike, 'B S//128 C_CHIP_HISTONE'] | None = None
-  chip_histone_mask: Bool[ArrayLike, 'B #S//128 C_CHIP_HISTONE'] | None = None
-  chip_tf: Float[ArrayLike, 'B S//128 C_CHIP_TF'] | None = None
-  chip_tf_mask: Bool[ArrayLike, 'B #S//128 C_CHIP_TF'] | None = None
-  rna_seq: Float[ArrayLike, 'B S C_RNA_SEQ'] | None = None
-  rna_seq_mask: Bool[ArrayLike, 'B #S C_RNA_SEQ'] | None = None
-  rna_seq_strand: Int[ArrayLike, 'B 1 C_RNA_SEQ'] | None = None
-  cage: Float[ArrayLike, 'B S C_CAGE'] | None = None
-  cage_mask: Bool[ArrayLike, 'B #S C_CAGE'] | None = None
+  dna_sequence: Float[ArrayType, 'B S_DNA 4'] | None = None
+  organism_index: Int[ArrayType, 'B'] | None = None
+  atac: Float[ArrayType, 'B S C_ATAC'] | None = None
+  atac_mask: Bool[ArrayType, 'B #S C_ATAC'] | None = None
+  dnase: Float[ArrayType, 'B S C_DNASE'] | None = None
+  dnase_mask: Bool[ArrayType, 'B #S C_DNASE'] | None = None
+  procap: Float[ArrayType, 'B S C_PROCAP'] | None = None
+  procap_mask: Bool[ArrayType, 'B #S C_PROCAP'] | None = None
+  chip_histone: Float[ArrayType, 'B S//128 C_CHIP_HISTONE'] | None = None
+  chip_histone_mask: Bool[ArrayType, 'B #S//128 C_CHIP_HISTONE'] | None = None
+  chip_tf: Float[ArrayType, 'B S//128 C_CHIP_TF'] | None = None
+  chip_tf_mask: Bool[ArrayType, 'B #S//128 C_CHIP_TF'] | None = None
+  rna_seq: Float[ArrayType, 'B S C_RNA_SEQ'] | None = None
+  rna_seq_mask: Bool[ArrayType, 'B #S C_RNA_SEQ'] | None = None
+  rna_seq_strand: Int[ArrayType, 'B 1 C_RNA_SEQ'] | None = None
+  cage: Float[ArrayType, 'B S C_CAGE'] | None = None
+  cage_mask: Bool[ArrayType, 'B #S C_CAGE'] | None = None
   contact_maps: (
-      Float[ArrayLike, 'B S_DNA//2048 S_DNA//2048 C_CONTACT_MAPS'] | None
+      Float[ArrayType, 'B S_DNA//2048 S_DNA//2048 C_CONTACT_MAPS'] | None
   ) = None
-  splice_junctions: Float[ArrayLike, 'B P P C_SPLICE_JUNCTIONS'] | None = None
-  splice_site_positions: Int[ArrayLike, 'B 4 P'] | None = None
-  splice_site_usage: Float[ArrayLike, 'B S C_SPLICE_SITE_USAGE'] | None = None
-  splice_sites: Bool[ArrayLike, 'B S C_SPLICE_SITES'] | None = None
-  gene_mask: Bool[ArrayLike, 'B S 2 G'] | None = None
+  splice_junctions: Float[ArrayType, 'B P P C_SPLICE_JUNCTIONS'] | None = None
+  splice_site_positions: Int[ArrayType, 'B 4 P'] | None = None
+  splice_site_usage: Float[ArrayType, 'B S C_SPLICE_SITE_USAGE'] | None = None
+  splice_sites: Bool[ArrayType, 'B S C_SPLICE_SITES'] | None = None
+  gene_mask: Bool[ArrayType, 'B S 2 G'] | None = None
 
-  def get_organism_index(self) -> Int[ArrayLike, 'B']:
+  def get_organism_index(self) -> Int[ArrayType, 'B']:
     """Returns the organism index data."""
     if self.organism_index is None:
       raise ValueError('Organism index data is not present in the batch.')
@@ -59,7 +60,7 @@ class DataBatch:
 
   def get_genome_tracks(
       self, bundle: bundles.BundleName
-  ) -> tuple[Float[ArrayLike, 'B S C'], Bool[ArrayLike, 'B #S C']]:
+  ) -> tuple[Float[ArrayType, 'B S C'], Bool[ArrayType, 'B #S C']]:
     """Returns the genome tracks data for the given bundle if present."""
     match bundle:
       case bundles.BundleName.ATAC:

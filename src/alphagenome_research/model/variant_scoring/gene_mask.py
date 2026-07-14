@@ -193,9 +193,9 @@ class GeneVariantScorer(
         == output_metadata['strand'].to_numpy()[None]
     ) | (output_metadata['strand'].to_numpy()[None] == '.')
     num_genes = len(mask_metadata)
-    scores = np.where(strand_mask, scores['score'][:num_genes], np.nan)
+    result = np.where(strand_mask, scores['score'][:num_genes], np.nan)
     return variant_scoring.create_anndata(
-        scores,
+        result,
         obs=mask_metadata,
         var=output_metadata,
     )

@@ -113,9 +113,11 @@ def get_tfrecords_df(
   if not tfrecord_paths:
     return pd.DataFrame()
 
-  return pd.concat(
+  df = pd.concat(
       [_parse_path(epath.Path(p)) for p in tfrecord_paths]
   ).reset_index(drop=True)
+  assert isinstance(df, pd.DataFrame)
+  return df
 
 
 def _get_parse_function(bundle: bundles_lib.BundleName):
@@ -146,7 +148,9 @@ def _get_tfrecords_dataset(
   parser = _get_parse_function(bundle)
 
   def _get(p):
-    ds = tf.data.TFRecordDataset(p, compression_type='GZIP')
+    ds = tf.data.TFRecordDataset(  # pytype: disable=bad-instantiation
+        p, compression_type='GZIP'
+    )
     ds = ds.map(parser, num_parallel_calls=tf.data.AUTOTUNE)
     return ds
 
@@ -174,7 +178,7 @@ def create_dataset(
     bundles: The bundles to load. If None, all bundles are loaded.
     path: The path to the TFRecord files. If None, the default path is used.
   """
-  bundles = bundles or [None]
+  bundles: Sequence[bundles_lib.BundleName | None] = bundles or [None]
   records = []
   for bundle in bundles:
     records.append(
@@ -222,7 +226,9 @@ def _parse_batch(
     element = (element,)
 
   merged_data = functools.reduce(lambda x, y: x | y, element)
-  organism_index = np.full((batch_size,), organism_index, dtype=np.int32)
+  organism_index: np.ndarray = np.full(
+      (batch_size,), organism_index, dtype=np.int32
+  )
   metadata = {
       'interval/chromosome': merged_data.pop('interval/chromosome'),
       'interval/start': merged_data.pop('interval/start'),

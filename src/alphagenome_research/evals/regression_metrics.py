@@ -16,11 +16,11 @@
 
 from typing import Sequence
 from alphagenome import typing
+from alphagenome_research.typing import ArrayType  # pylint: disable=g-importing-member
 import chex
 import jax
 import jax.numpy as jnp
-from jaxtyping import ArrayLike, Float, PyTree  # pylint: disable=g-importing-member, g-multiple-import
-import numpy as np
+from jaxtyping import Float, PyTree  # pylint: disable=g-importing-member, g-multiple-import
 
 
 @chex.dataclass
@@ -41,12 +41,12 @@ class _PearsonRState:
 def _pearsonr_initialize() -> '_PearsonRState':
   """Initialize PearsonrState with zeros."""
   return _PearsonRState(
-      xy_sum=np.zeros(()),
-      x_sum=np.zeros(()),
-      xx_sum=np.zeros(()),
-      y_sum=np.zeros(()),
-      yy_sum=np.zeros(()),
-      count=np.zeros(()),
+      xy_sum=jnp.zeros(()),
+      x_sum=jnp.zeros(()),
+      xx_sum=jnp.zeros(()),
+      y_sum=jnp.zeros(()),
+      yy_sum=jnp.zeros(()),
+      count=jnp.zeros(()),
   )
 
 
@@ -106,9 +106,9 @@ def initialize_regression_metrics() -> RegressionState:
   return RegressionState(
       pearsonr=_pearsonr_initialize(),
       pearsonr_log1p=_pearsonr_initialize(),
-      sq_error=np.zeros(()),
-      abs_error=np.zeros(()),
-      count=np.zeros(()),
+      sq_error=jnp.zeros(()),
+      abs_error=jnp.zeros(()),
+      count=jnp.zeros(()),
   )
 
 
@@ -183,8 +183,8 @@ def reduce_regression_metrics(
 
 @typing.jaxtyped
 def crop_sequence_length(
-    x: Float[ArrayLike, '... S D'], *, target_length: int
-) -> Float[ArrayLike, '... {target_length} D']:
+    x: Float[ArrayType, '... S D'], *, target_length: int
+) -> Float[ArrayType, '... {target_length} D']:
   """Crops an array to match the target length along the sequence dimension."""
   sequence_axis = -2
   if x.shape[sequence_axis] < target_length:

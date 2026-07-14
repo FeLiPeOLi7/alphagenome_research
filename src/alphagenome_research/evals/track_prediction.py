@@ -32,6 +32,7 @@ import haiku as hk
 import jax
 from jax import sharding
 from jax.experimental import mesh_utils
+import jax.numpy as jnp
 from jaxtyping import PyTree  # pylint: disable=g-importing-member
 import jmp
 import kagglehub
@@ -110,9 +111,12 @@ def create_eval_step(
   )
   def eval_step(params, state, batch: schemas.DataBatch):
     predictions = predict_fn(
-        params, state, batch.dna_sequence, batch.organism_index
+        params,
+        state,
+        jnp.asarray(batch.dna_sequence, copy=False),
+        jnp.asarray(batch.organism_index, copy=False),
     )
-    metrics_step = {}
+    metrics_step: dict[str, regression_metrics.RegressionState] = {}
     for bundle in bundles:
       targets_true, mask = batch.get_genome_tracks(bundle)
       targets_pred = predictions[dna_output.OutputType[bundle.name]]
@@ -120,7 +124,9 @@ def create_eval_step(
           targets_pred, target_length=targets_true.shape[-2]
       )
       metrics_step[bundle.name] = regression_metrics.update_regression_metrics(
-          targets_true, targets_pred, mask
+          jnp.asarray(targets_true),
+          jnp.asarray(targets_pred),
+          jnp.asarray(mask),
       )
     return metrics_step
 
@@ -153,6 +159,7 @@ def evaluate(
   num_elements = 0
 
   for i, (batch, _) in enumerate(dataset_iterator):
+    assert batch.dna_sequence is not None
     num_elements += batch.dna_sequence.shape[0]
     if i % _LOG_FREQUENCY == 1:
       m = pprint.pformat(
