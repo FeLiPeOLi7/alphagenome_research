@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0]
+
+### Added
+
+-   Support indel stitching in AlphaGenome variant prediction and enable it by
+    default.
+-   Support calculating variant score quantiles.
+-   Export `.pyi` files for generated protocol buffers.
+
+### Changed
+
+-   Improvements for fine-tuning (per-head loss weights, target smoothing,
+    splicing ROPE initialization and BatchNorm training mode)
+-   Migrate to use `FastaExtractor` from `alphagenome`.
+-   Use `variant.start` to calculate the middle of the center mask.
+-   Fix negative strand bug for `score_interval` and `score_variant`.
+-   Update type annotations and fix typing errors.
+
 ## [0.2.0]
 
 ### Added
