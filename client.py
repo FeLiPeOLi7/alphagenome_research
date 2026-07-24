@@ -43,24 +43,24 @@ def run_client():
         ontology_terms=[term]
     )
 
-    print("🚀 Enviando requisição gRPC para o servidor AlphaGenome...")
+    print("Enviando requisição gRPC para o servidor AlphaGenome...")
     responses = stub.PredictVariant(iter([request]))
 
     for i, response in enumerate(responses):
-        print(f"\n✅ [Pacote {i+1}] Dados recebidos do servidor!")
+        print(f"\n[Pacote {i+1}] Dados recebidos do servidor!")
 
         ref_data = unpack_tensor(response.reference_output.track_data.values)
         alt_data = unpack_tensor(response.alternate_output.track_data.values)
 
         if ref_data is not None:
-            print(f"📊 Tensor Referência: Shape = {ref_data.shape}, Média = {ref_data.mean():.4f}")
+            print(f"Tensor Referência: Shape = {ref_data.shape}, Média = {ref_data.mean():.4f}")
         
         if alt_data is not None:
-            print(f"📊 Tensor Alternativa: Shape = {alt_data.shape}, Média = {alt_data.mean():.4f}")
+            print(f"Tensor Alternativa: Shape = {alt_data.shape}, Média = {alt_data.mean():.4f}")
 
         if ref_data is not None and alt_data is not None:
             diff = alt_data - ref_data
-            print(f"🧬 Impacto da Variante (Alt - Ref): Min = {diff.min():.4f}, Max = {diff.max():.4f}")
+            print(f"Impacto da Variante (Alt - Ref): Min = {diff.min():.4f}, Max = {diff.max():.4f}")
         
         # Salvar o que estiver disponível
         output_file = "variant_predictions.npz"
@@ -69,7 +69,7 @@ def run_client():
             reference=ref_data if ref_data is not None else np.array([]),
             alternate=alt_data if alt_data is not None else np.array([])
         )
-        print(f"💾 Resultados salvos no arquivo: '{output_file}'")
+        print(f"Resultados salvos no arquivo: '{output_file}'")
 
 if __name__ == '__main__':
     run_client()
