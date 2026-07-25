@@ -29,10 +29,11 @@ def fill_track_data_proto(track_data_proto, track_obj, interval_proto):
     # 3. Copia a Resolução e o Intervalo Genômico
     if hasattr(track_obj, 'resolution') and track_obj.resolution:
         track_data_proto.resolution = int(track_obj.resolution)
-
-    track_data_proto.interval.chromosome = interval_proto.chromosome
-    track_data_proto.interval.start = interval_proto.start
-    track_data_proto.interval.end = interval_proto.end
+    
+    if interval_proto is not None:
+        track_data_proto.interval.chromosome = interval_proto.chromosome
+        track_data_proto.interval.start = interval_proto.start
+        track_data_proto.interval.end = interval_proto.end
 
 
 def populate_output_proto(output_proto, model_output, interval_proto):
@@ -70,6 +71,49 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
         self.model = dna_model.create_from_huggingface('all_folds')
         print("[DGX] Modelo carregado com sucesso na VRAM!")
 
+    def _parse_ontology_terms(self, terms_proto):
+        ontology_list = []
+        for term in terms_proto:
+            prefix = dna_model_pb2.OntologyType.Name(term.ontology_type).replace("ONTOLOGY_TYPE_", "")
+            ontology_list.append(f"{prefix}:{term.id:07d}")
+        return ontology_list
+
+    def _parse_requested_outputs(self, outputs_proto):
+        if hasattr(outputs_proto, '__len__') and len(outputs_proto) > 0:
+            return [
+                dna_model.OutputType[dna_model_pb2.OutputType.Name(o)]
+                for o in outputs_proto
+            ]
+        return [dna_model.OutputType.RNA_SEQ]
+
+    def _parse_organism(self, organism_proto):
+        if not organism_proto:
+            return dna_model.Organism.HOMO_SAPIENS  # Padrão é humano
+         
+        # Extrai 'HOMO_SAPIENS' de 'ORGANISM_HOMO_SAPIENS'
+        enum_name = dna_model_pb2.Organism.Name(organism_proto).replace("ORGANISM_", "")
+        return getattr(dna_model.Organism, enum_name, dna_model.Organism.HOMO_SAPIENS)
+
+    def _parse_variant_scorers(self, scorers_proto):
+        if not scorers_proto:
+            return None  # Se omitido, o AlphaGenome usa os scorers padrão
+        
+        scorers = []
+        for scorer_enum in scorers_proto:
+            scorer_name = dna_model_pb2.VariantScorer.Name(scorer_enum).replace("VARIANT_SCORER_", "")
+            scorers.append(scorer_name)
+
+        return scorers if scorers else None
+
+    def _parse_interval_scorers(self, scorers_proto):
+        if not scorers_proto:
+            return None
+        scorers = []
+        for scorer_enum in scorers_proto:
+            scorer_name = dna_model_pb2.IntervalScorer.Name(scorer_enum).replace("INTERVAL_SCORER_", "")
+            scorers.append(scorer_name)
+        return scorers if scorers else None
+
     def PredictVariant(self, request_iterator, context):
         print("\n[gRPC] Nova requisição PredictVariant recebida...")
 
@@ -87,23 +131,19 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
             )
 
             # Processa Ontologias
-            ontology_list = []
-            for term in request.ontology_terms:
-                prefix = dna_model_pb2.OntologyType.Name(term.ontology_type).replace("ONTOLOGY_TYPE_", "")
-                ontology_list.append(f"{prefix}:{term.id:07d}")
+            ontology_list = self._parse_ontology_terms(request.ontology_terms)
 
             # Define as saídas requisitadas
-            requested_outputs = [dna_model.OutputType.RNA_SEQ]
-            if hasattr(request, 'requested_outputs') and request.requested_outputs:
-                requested_outputs = [
-                    dna_model.OutputType[dna_model_pb2.OutputType.Name(o)]
-                    for o in request.requested_outputs
-                ]
+            requested_outputs = self._parse_requested_outputs(request.requested_outputs)
+            
+            # Define o organismo
+            organism = self._parse_organism(request.organism)
 
             print(f"Executando variante {variant.chromosome}:{variant.position} ({variant.reference_bases}->{variant.alternate_bases}) na GPU...")
 
             outputs = self.model.predict_variant(
                 interval=interval,
+                organism=organism,
                 variant=variant,
                 ontology_terms=ontology_list,
                 requested_outputs=requested_outputs,
@@ -120,6 +160,209 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
 
             print("[gRPC] Transmitindo matrizes de inferência para o cliente...")
             yield response
+
+    def PredictInterval(self, request_iterator, context):
+        print("\n[gRPC] Nova requisição PredictInterval recebida...")
+
+        for request in request_iterator:
+            interval = genome.Interval(
+                chromosome=request.interval.chromosome,
+                start=request.interval.start,
+                end=request.interval.end
+            )
+            
+            # Processa Ontologias
+            ontology_list = self._parse_ontology_terms(request.ontology_terms)
+
+            # Define as saídas requisitadas
+            requested_outputs = self._parse_requested_outputs(request.requested_outputs)
+
+            # Define o organismo
+            organism = self._parse_organism(request.organism)
+
+
+            output = self.model.predict_interval(
+                interval=interval,
+                organism=organism,
+                ontology_terms=ontology_list,
+                requested_outputs=requested_outputs,
+            )
+
+            response = dna_model_service_pb2.PredictIntervalResponse()
+
+            populate_output_proto(response.output, output, request.interval)
+            yield response
+
+    def PredictSequence(self, request_iterator, context):
+        print("\n[gRPC] Nova requisição PredictSequence recebida...")
+
+        for request in request_iterator:
+            seq_str = request.sequence
+            
+            # Processa Ontologias
+            ontology_list = self._parse_ontology_terms(request.ontology_terms)
+
+            # Define as saídas requisitadas
+            requested_outputs = self._parse_requested_outputs(request.requested_outputs)
+
+            # Define o organismo
+            organism = self._parse_organism(request.organism)
+
+
+            output = self.model.predict_sequence(
+                sequence=seq_str,
+                organism=organism,
+                ontology_terms=ontology_list,
+                requested_outputs=requested_outputs,
+            )
+
+            response = dna_model_service_pb2.PredictSequenceResponse()
+
+            populate_output_proto(response.output, output, interval_proto=None)
+            yield response
+
+    def ScoreVariant(self, request_iterator, context):
+        print("\n[gRPC] Nova requisição ScoreVariant recebida...")
+
+        for request in request_iterator:
+            interval = genome.Interval(
+                chromosome=request.interval.chromosome,
+                start=request.interval.start,
+                end=request.interval.end
+            )
+            variant = genome.Variant(
+                chromosome=request.variant.chromosome,
+                position=request.variant.position,
+                reference_bases=request.variant.reference_bases,
+                alternate_bases=request.variant.alternate_bases
+            )
+
+            kwargs = {
+                "interval": interval,
+                "variant": variant,
+                "organism": self._parse_organism(request.organism),
+            }
+
+            variant_scorers = self._parse_variant_scorers(request.variant_scorers)
+            if variant_scorers:
+                kwargs["variant_scorers"] = variant_scorers
+
+            scores = self.model.score_variant(**kwargs)
+
+            # O modelo pode retornar um único resultado ou uma lista (chunks)
+            if not isinstance(scores, list):
+                scores = [scores]
+
+            for item in scores:
+                response = dna_model_service_pb2.ScoreVariantResponse()
+                
+                item_to_proto = getattr(item, 'to_proto', None)
+                if callable(item_to_proto):
+                    response.CopyFrom(item_to_proto())
+                else:
+                    # Usamos a mesma função de popular que já varre os tipos (rna_seq, etc)
+                    populate_output_proto(response.output, item, request.interval)
+                
+                yield response
+
+    def ScoreInterval(self, request_iterator, context):
+        print("\n[gRPC] Nova requisição ScoreInterval recebida...")
+
+        for request in request_iterator:
+            interval = genome.Interval(
+                chromosome=request.interval.chromosome,
+                start=request.interval.start,
+                end=request.interval.end
+            )
+
+            kwargs = {
+                "interval": interval,
+                "organism": self._parse_organism(request.organism),
+            }
+
+            interval_scorers = self._parse_interval_scorers(request.interval_scorers)
+            if interval_scorers:
+                kwargs["interval_scorers"] = interval_scorers
+
+            scores = self.model.score_interval(**kwargs)
+
+            response = dna_model_service_pb2.ScoreIntervalResponse()
+
+            to_proto_fn = getattr(scores, 'to_proto', None)
+            scores_dict = getattr(scores, 'scores', None)
+
+            if callable(to_proto_fn):
+                response.CopyFrom(to_proto_fn())
+            elif isinstance(scores_dict, dict):
+                for _, track_obj in scores_dict.items():
+                    score_proto = response.scores.add()
+                    fill_track_data_proto(score_proto.track_data, track_obj, request.interval)
+            elif isinstance(scores, list):
+                for item in scores:
+                    score_proto = response.scores.add()
+                    item_to_proto = getattr(item, 'to_proto', None)
+                    if callable(item_to_proto):
+                        score_proto.CopyFrom(item_to_proto())
+                    else:
+                        fill_track_data_proto(score_proto.track_data, item, request.interval)
+
+            yield response
+
+    def ScoreIsmVariant(self, request_iterator, context):
+        print("\n[gRPC] Nova requisição ScoreIsmVariant recebida...")
+
+        for request in request_iterator:
+            interval = genome.Interval(
+                chromosome=request.interval.chromosome,
+                start=request.interval.start,
+                end=request.interval.end
+            )
+
+            kwargs = {
+                "interval": interval,
+                "organism": self._parse_organism(request.organism),
+            }
+
+            variant_scorers = self._parse_variant_scorers(request.variant_scorers)
+            if variant_scorers:
+                kwargs["variant_scorers"] = variant_scorers
+
+            if request.ism_interval and request.ism_interval.chromosome:
+                kwargs["ism_interval"] = genome.Interval(
+                    chromosome=request.ism_interval.chromosome,
+                    start=request.ism_interval.start,
+                    end=request.ism_interval.end
+                )
+
+            scores = self.model.score_ism_variant(**kwargs)
+
+            response = dna_model_service_pb2.ScoreIsmVariantResponse()
+
+            to_proto_fn = getattr(scores, 'to_proto', None)
+            scores_dict = getattr(scores, 'scores', None)
+
+            if callable(to_proto_fn):
+                response.CopyFrom(to_proto_fn())
+            elif isinstance(scores_dict, dict):
+                for _, track_obj in scores_dict.items():
+                    score_proto = response.scores.add()
+                    fill_track_data_proto(score_proto.track_data, track_obj, request.interval)
+            elif isinstance(scores, list):
+                for item in scores:
+                    score_proto = response.scores.add()
+                    item_to_proto = getattr(item, 'to_proto', None)
+                    if callable(item_to_proto):
+                        score_proto.CopyFrom(item_to_proto())
+                    else:
+                        fill_track_data_proto(score_proto.track_data, item, request.interval)
+
+            yield response    
+
+    def GetMetadata(self, request, context):
+        print("\n[gRPC] Nova requisição GetMetadata recebida...")
+        response = dna_model_service_pb2.GetMetadataResponse()
+        return response
+
 
 
 def serve():
