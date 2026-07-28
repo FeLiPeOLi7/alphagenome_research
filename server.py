@@ -14,35 +14,119 @@ from alphagenome.protos import dna_model_service_pb2
 from alphagenome.protos import dna_model_pb2
 from alphagenome.data.genome import Interval
 
-def fill_track_data_proto(track_data_proto, track_obj, interval_proto):
-    """Converte a matriz NumPy do AlphaGenome para a estrutura Protobuf TrackData"""
-    if track_obj is None or getattr(track_obj, 'values', None) is None:
+def extract_numpy_array(obj):
+    """Extrai uma matriz NumPy (float32) de objetos AlphaGenome, AnnData, DataFrames, escopos de score ou arrays."""
+    if obj is None:
+        return None
+
+    if isinstance(obj, np.ndarray):
+        return obj
+
+    # AnnData ou objeto de score com atributo .X (matriz principal)
+    if hasattr(obj, 'X') and getattr(obj, 'X') is not None:
+        val = getattr(obj, 'X')
+        if hasattr(val, 'toarray'):  # scipy.sparse matrix
+            return val.toarray()
+        return np.asarray(val)
+
+    # Objeto com atributo .values (Track, DataFrame, Series, etc.)
+    if hasattr(obj, 'values') and getattr(obj, 'values') is not None:
+        val = getattr(obj, 'values')
+        if isinstance(val, np.ndarray):
+            return val
+        if hasattr(val, 'toarray'):
+            return val.toarray()
+        return np.asarray(val)
+
+    # Objeto com atributo .scores, .array ou .data
+    for attr in ['scores', 'array', 'data']:
+        if hasattr(obj, attr) and getattr(obj, attr) is not None:
+            val = getattr(obj, attr)
+            if not callable(val):
+                if isinstance(val, np.ndarray):
+                    return val
+                if hasattr(val, 'toarray'):
+                    return val.toarray()
+                try:
+                    return np.asarray(val)
+                except Exception:
+                    pass
+
+    # Dicionário contendo dados numéricos
+    if isinstance(obj, dict):
+        for k in ['X', 'values', 'scores', 'data', 'array']:
+            if k in obj and obj[k] is not None:
+                res = extract_numpy_array(obj[k])
+                if res is not None:
+                    return res
+
+    # Tentativa genérica para iteráveis/array-like (evitando strings ou protobufs)
+    if not isinstance(obj, (str, bytes)) and not hasattr(obj, 'DESCRIPTOR'):
+        try:
+            return np.asarray(obj)
+        except Exception:
+            pass
+
+    return None
+
+
+def fill_tensor_chunk_proto(tensor_chunk_proto, arr):
+    """Converte a matriz NumPy para a estrutura Protobuf TensorChunk (shape e bytes)."""
+    if arr is None or tensor_chunk_proto is None:
+        return
+    arr_np = np.asarray(arr, dtype=np.float32)
+    tensor_chunk_proto.shape.clear()
+    tensor_chunk_proto.shape.extend(arr_np.shape)
+    tensor_chunk_proto.array.data = arr_np.tobytes()
+
+
+def fill_data_proto(data_proto, arr, interval_proto=None):
+    """
+    Preenche uma estrutura Protobuf (TrackData, IntervalData ou VariantData)
+    com dados de um array NumPy e o intervalo genômico.
+    """
+    if arr is None or data_proto is None:
         return
 
-    arr = track_obj.values
-    
-    # 1. Copia o Shape da matriz
-    track_data_proto.values.shape.extend(arr.shape)
-    
-    # 2. Copia os bytes da matriz Float32 diretamente para o TensorChunk
-    track_data_proto.values.array.data = arr.astype(np.float32).tobytes()
+    arr_np = np.asarray(arr, dtype=np.float32)
 
-    # 3. Copia a Resolução e o Intervalo Genômico
-    if hasattr(track_obj, 'resolution') and track_obj.resolution:
-        track_data_proto.resolution = int(track_obj.resolution)
-    
-    if interval_proto is not None:
-        track_data_proto.interval.chromosome = interval_proto.chromosome
-        track_data_proto.interval.start = interval_proto.start
-        track_data_proto.interval.end = interval_proto.end
+    # Preenche os valores no campo 'values' ou 'array'
+    if hasattr(data_proto, 'values'):
+        fill_tensor_chunk_proto(data_proto.values, arr_np)
+    elif hasattr(data_proto, 'array'):
+        fill_tensor_chunk_proto(data_proto.array, arr_np)
+    else:
+        fill_tensor_chunk_proto(data_proto, arr_np)
+
+    # Copia a Resolução (se disponível no objeto original)
+    if hasattr(arr, 'resolution') and hasattr(data_proto, 'resolution'):
+        try:
+            data_proto.resolution = int(arr.resolution)
+        except (ValueError, TypeError):
+            pass
+
+    # Copia o Intervalo Genômico
+    if interval_proto is not None and hasattr(data_proto, 'interval'):
+        data_proto.interval.chromosome = interval_proto.chromosome
+        data_proto.interval.start = interval_proto.start
+        data_proto.interval.end = interval_proto.end
 
 
-def populate_output_proto(output_proto, model_output, interval_proto):
-    """Varre todas as faixas (tracks) disponíveis e preenche a resposta Protobuf"""
-    if model_output is None:
+def fill_track_data_proto(track_data_proto, track_obj, interval_proto=None):
+    """Converte a matriz do AlphaGenome para a estrutura Protobuf TrackData (compatibilidade)."""
+    if track_obj is None or track_data_proto is None:
+        return
+    arr = extract_numpy_array(track_obj)
+    if arr is not None:
+        fill_data_proto(track_data_proto, arr, interval_proto)
+
+
+def populate_output_proto(output_proto, model_output, interval_proto=None, output_category=None):
+    """Varre todas as faixas (tracks) e/ou objetos AnnData/Score e preenche a resposta Protobuf."""
+    if model_output is None or output_proto is None:
         return
 
-    # Mapeamento dos tipos de saída suportados pelo AlphaGenome
+    # 1. Mapeamento dos tipos de saída suportados para tracks de predição direta
     track_mapping = [
         ('rna_seq', dna_model_pb2.OUTPUT_TYPE_RNA_SEQ),
         ('cage', dna_model_pb2.OUTPUT_TYPE_CAGE),
@@ -57,20 +141,56 @@ def populate_output_proto(output_proto, model_output, interval_proto):
         ('procap', dna_model_pb2.OUTPUT_TYPE_PROCAP),
     ]
 
+    has_track_attr = False
     for attr_name, output_enum in track_mapping:
         if hasattr(model_output, attr_name):
             track_obj = getattr(model_output, attr_name)
             if track_obj is not None:
+                has_track_attr = True
                 output_proto.output_type = output_enum
                 fill_track_data_proto(output_proto.track_data, track_obj, interval_proto)
-                break  # Processa o primeiro track encontrado no objeto de saída
+                break
+
+    if has_track_attr:
+        return
+
+    # 2. Caso seja um objeto AnnData ou resultado de Scoring (ScoreInterval / ScoreIsmVariant / ScoreVariant)
+    arr = extract_numpy_array(model_output)
+    if arr is not None:
+        valid_fields = set(f.name for f in output_proto.DESCRIPTOR.fields)
+
+        if output_category == 'variant' and 'variant_data' in valid_fields:
+            fill_data_proto(output_proto.variant_data, arr, interval_proto)
+        elif output_category == 'interval' and 'interval_data' in valid_fields:
+            fill_data_proto(output_proto.interval_data, arr, interval_proto)
+        elif 'interval_data' in valid_fields and output_category == 'interval':
+            fill_data_proto(output_proto.interval_data, arr, interval_proto)
+        elif 'variant_data' in valid_fields and output_category == 'variant':
+            fill_data_proto(output_proto.variant_data, arr, interval_proto)
+        elif 'interval_data' in valid_fields:
+            fill_data_proto(output_proto.interval_data, arr, interval_proto)
+        elif 'variant_data' in valid_fields:
+            fill_data_proto(output_proto.variant_data, arr, interval_proto)
+        elif 'track_data' in valid_fields:
+            fill_data_proto(output_proto.track_data, arr, interval_proto)
+
+
+def flatten_scores(scores):
+    """Achata recursivamente listas/tuplas aninhadas de objetos de score ou AnnData."""
+    flat = []
+    if isinstance(scores, (list, tuple)):
+        for element in scores:
+            flat.extend(flatten_scores(element))
+    elif scores is not None:
+        flat.append(scores)
+    return flat
 
 
 class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
     def __init__(self):
-        print("[DGX] Carregando o modelo AlphaGenome na GPU...")
+        print("[DGX] Carregando o modelo AlphaGenome na GPU ('all_folds')...", flush=True)
         self.model = dna_model.create_from_huggingface('all_folds')
-        print("[DGX] Modelo carregado com sucesso na VRAM!")
+        print("[DGX] Modelo carregado com sucesso na VRAM!", flush=True)
 
     def _parse_ontology_terms(self, terms_proto):
         ontology_list = []
@@ -268,20 +388,23 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
                 kwargs["variant_scorers"] = variant_scorers
 
             scores = self.model.score_variant(**kwargs)
-
-            # O modelo pode retornar um único resultado ou uma lista (chunks)
-            if not isinstance(scores, list):
-                scores = [scores]
+            scores = flatten_scores(scores)
 
             for item in scores:
                 response = dna_model_service_pb2.ScoreVariantResponse()
                 
                 item_to_proto = getattr(item, 'to_proto', None)
+                proto_obj = None
                 if callable(item_to_proto):
-                    response.CopyFrom(item_to_proto())
+                    try:
+                        proto_obj = item_to_proto()
+                    except Exception:
+                        pass
+
+                if proto_obj is not None and hasattr(proto_obj, 'DESCRIPTOR'):
+                    response.CopyFrom(proto_obj)
                 else:
-                    # Usamos a mesma função de popular que já varre os tipos (rna_seq, etc)
-                    populate_output_proto(response.output, item, request.interval)
+                    populate_output_proto(response.output, item, request.interval, output_category='variant')
                 
                 yield response
 
@@ -297,17 +420,22 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
                     interval=interval,
                     organism=organism
                 )
-
-                if not isinstance(scores, list):
-                    scores = [scores]
+                scores = flatten_scores(scores)
 
                 for item in scores:
                     response = dna_model_service_pb2.ScoreIntervalResponse()
                     item_to_proto = getattr(item, 'to_proto', None)
+                    proto_obj = None
                     if callable(item_to_proto):
-                        response.CopyFrom(item_to_proto())
+                        try:
+                            proto_obj = item_to_proto()
+                        except Exception:
+                            pass
+
+                    if proto_obj is not None and hasattr(proto_obj, 'DESCRIPTOR'):
+                        response.CopyFrom(proto_obj)
                     else:
-                        populate_output_proto(response.output, item, request.interval)
+                        populate_output_proto(response.output, item, request.interval, output_category='interval')
                     yield response
 
         except Exception as e:
@@ -329,17 +457,22 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
                     organism=organism,
                     ism_interval=ism_interval
                 )
-
-                if not isinstance(scores, list):
-                    scores = [scores]
+                scores = flatten_scores(scores)
 
                 for item in scores:
                     response = dna_model_service_pb2.ScoreIsmVariantResponse()
                     item_to_proto = getattr(item, 'to_proto', None)
+                    proto_obj = None
                     if callable(item_to_proto):
-                        response.CopyFrom(item_to_proto())
+                        try:
+                            proto_obj = item_to_proto()
+                        except Exception:
+                            pass
+
+                    if proto_obj is not None and hasattr(proto_obj, 'DESCRIPTOR'):
+                        response.CopyFrom(proto_obj)
                     else:
-                        populate_output_proto(response.output, item, request.interval)
+                        populate_output_proto(response.output, item, request.interval, output_category='variant')
                     yield response
 
         except Exception as e:
