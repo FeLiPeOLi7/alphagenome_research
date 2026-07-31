@@ -78,8 +78,13 @@ class AlphaGenomeDGX:
         ref_data = None
         alt_data = None
 
+        # reference_output e alternate_output pertencem ao mesmo 'oneof payload' do proto,
+        # entao cada pacote carrega apenas um deles. Acumula conforme chegam.
         for response in responses:
-            ref_data = self._unpack_tensor(response.reference_output.track_data.values)
-            alt_data = self._unpack_tensor(response.alternate_output.track_data.values)
+            payload = response.WhichOneof('payload')
+            if payload == 'reference_output' and ref_data is None:
+                ref_data = self._unpack_tensor(response.reference_output.track_data.values)
+            elif payload == 'alternate_output' and alt_data is None:
+                alt_data = self._unpack_tensor(response.alternate_output.track_data.values)
 
         return AlphaGenomePrediction(reference=ref_data, alternate=alt_data)

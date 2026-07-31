@@ -116,6 +116,7 @@ def fill_track_data_proto(track_data_proto, track_obj, interval_proto=None):
     """Converte a matriz do AlphaGenome para a estrutura Protobuf TrackData (compatibilidade)."""
     if track_obj is None or track_data_proto is None:
         return
+
     arr = extract_numpy_array(track_obj)
     if arr is not None:
         fill_data_proto(track_data_proto, arr, interval_proto)
@@ -187,9 +188,12 @@ def flatten_scores(scores):
 
 
 class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
-    def __init__(self):
+    def __init__(self, model=None):
         print("[DGX] Carregando o modelo AlphaGenome na GPU ('all_folds')...", flush=True)
-        self.model = dna_model.create_from_huggingface('all_folds')
+        if model is None:
+            self.model = dna_model.create_from_huggingface('all_folds')
+        else:
+            self.model = model
         print("[DGX] Modelo carregado com sucesso na VRAM!", flush=True)
 
     def _parse_ontology_terms(self, terms_proto):
@@ -289,17 +293,36 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
                 requested_outputs=requested_outputs,
             )
 
-            response = dna_model_service_pb2.PredictVariantResponse()
+            # 1. Resgate blindado (suporta tanto se 'outputs' for uma classe quanto um dicionário)
+            ref_data = getattr(outputs, 'reference', None)
+            if ref_data is None and isinstance(outputs, dict):
+                ref_data = outputs.get('reference')
+                
+            alt_data = getattr(outputs, 'alternate', None)
+            if alt_data is None and isinstance(outputs, dict):
+                alt_data = outputs.get('alternate')
 
-            # Preenche Referência e Alternativa dinamicamente
-            if hasattr(outputs, 'reference') and outputs.reference:
-                populate_output_proto(response.reference_output, outputs.reference, request.interval)
+            # 2. Preenche Referência dinamicamente (is not None resolve a armadilha do truthiness)
+            # NOTA: reference_output e alternate_output pertencem ao mesmo 'oneof payload' no proto,
+            # entao precisam ser enviados em respostas separadas (o segundo apagaria o primeiro).
+            if ref_data is not None:
+                try:
+                    ref_response = dna_model_service_pb2.PredictVariantResponse()
+                    populate_output_proto(ref_response.reference_output, ref_data, interval, output_category="variant")
+                    yield ref_response
+                except Exception as e:
+                    print(f"\n[gRPC ERRO FATAL] Falha interna no populate_output_proto (Referência): {e}")
 
-            if hasattr(outputs, 'alternate') and outputs.alternate:
-                populate_output_proto(response.alternate_output, outputs.alternate, request.interval)
+            # 3. Preenche Alternativa dinamicamente
+            if alt_data is not None:
+                try:
+                    alt_response = dna_model_service_pb2.PredictVariantResponse()
+                    populate_output_proto(alt_response.alternate_output, alt_data, interval, output_category="variant")
+                    yield alt_response
+                except Exception as e:
+                    print(f"\n[gRPC ERRO FATAL] Falha interna no populate_output_proto (Alternativa): {e}")
 
             print("[gRPC] Transmitindo matrizes de inferência para o cliente...")
-            yield response
 
     def PredictInterval(self, request_iterator, context):
         print("\n[gRPC] Nova requisição PredictInterval recebida...")
