@@ -8,6 +8,9 @@ os.environ["HF_HUB_DISABLE_XET"] = "1"
 MAX_MESSAGE_LENGTH = 100 * 1024 * 1024  # 100 MB
 
 from alphagenome.data import genome
+from alphagenome.models import dna_output
+from alphagenome.models import interval_scorers as interval_scorers_lib
+from alphagenome.models import variant_scorers as variant_scorers_lib
 from alphagenome_research.model import dna_model
 from alphagenome.protos import dna_model_service_pb2_grpc
 from alphagenome.protos import dna_model_service_pb2
@@ -88,7 +91,11 @@ def fill_data_proto(data_proto, arr, interval_proto=None):
     if arr is None or data_proto is None:
         return
 
-    arr_np = np.asarray(arr, dtype=np.float32)
+    try:
+        arr_np = np.asarray(arr, dtype=np.float32)
+    except (TypeError, ValueError):
+        print(f"[gRPC] Aviso: dados não numéricos ignorados ({type(arr).__name__})")
+        return
 
     # Preenche os valores no campo 'values' ou 'array'
     if hasattr(data_proto, 'values'):
@@ -219,8 +226,14 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
                 parsed.append(dna_model.OutputType[clean_name])
             elif hasattr(dna_model.OutputType, name):
                 parsed.append(getattr(dna_model.OutputType, name))
-            
-        return parsed 
+
+        # Sem requested_outputs o modelo roda com conjunto vazio (todas as tracks None),
+        # o que fazia o populate_output_proto tentar converter o próprio 'Output' em float.
+        # Usa RNA_SEQ como padrão para o fluxo sempre retornar dados de expressão.
+        if not parsed:
+            parsed = [dna_model.OutputType.RNA_SEQ]
+
+        return parsed
         
     def _parse_organism(self, organism_proto):
         if not organism_proto:
@@ -233,21 +246,59 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
     def _parse_variant_scorers(self, scorers_proto):
         if not scorers_proto:
             return None  # Se omitido, o AlphaGenome usa os scorers padrão
-        
+
         scorers = []
-        for scorer_enum in scorers_proto:
-            scorer_name = dna_model_pb2.VariantScorer.Name(scorer_enum).replace("VARIANT_SCORER_", "")
-            scorers.append(scorer_name)
+        for scorer_proto in scorers_proto:
+            which = scorer_proto.WhichOneof('scorer')
+            if which == 'center_mask':
+                cm = scorer_proto.center_mask
+                scorers.append(variant_scorers_lib.CenterMaskScorer(
+                    requested_output=dna_output.OutputType(cm.requested_output),
+                    width=cm.width if cm.HasField('width') else None,
+                    aggregation_type=variant_scorers_lib.AggregationType(cm.aggregation_type),
+                ))
+            elif which == 'gene_mask':
+                scorers.append(variant_scorers_lib.GeneMaskLFCScorer(
+                    requested_output=dna_output.OutputType(scorer_proto.gene_mask.requested_output),
+                ))
+            elif which == 'gene_mask_active':
+                scorers.append(variant_scorers_lib.GeneMaskActiveScorer(
+                    requested_output=dna_output.OutputType(scorer_proto.gene_mask_active.requested_output),
+                ))
+            elif which == 'gene_mask_splicing':
+                gms = scorer_proto.gene_mask_splicing
+                scorers.append(variant_scorers_lib.GeneMaskSplicingScorer(
+                    requested_output=dna_output.OutputType(gms.requested_output),
+                    width=gms.width if gms.HasField('width') else None,
+                ))
+            elif which == 'pa_qtl':
+                scorers.append(variant_scorers_lib.PolyadenylationScorer())
+            elif which == 'splice_junction':
+                scorers.append(variant_scorers_lib.SpliceJunctionScorer())
+            elif which == 'contact_map':
+                scorers.append(variant_scorers_lib.ContactMapScorer())
+            else:
+                raise ValueError(f"Variant scorer não suportado: {which}")
 
         return scorers if scorers else None
 
     def _parse_interval_scorers(self, scorers_proto):
         if not scorers_proto:
             return None
+
         scorers = []
-        for scorer_enum in scorers_proto:
-            scorer_name = dna_model_pb2.IntervalScorer.Name(scorer_enum).replace("INTERVAL_SCORER_", "")
-            scorers.append(scorer_name)
+        for scorer_proto in scorers_proto:
+            which = scorer_proto.WhichOneof('scorer')
+            if which == 'gene_mask':
+                gm = scorer_proto.gene_mask
+                scorers.append(interval_scorers_lib.GeneMaskScorer(
+                    requested_output=dna_output.OutputType(gm.requested_output),
+                    width=gm.width if gm.HasField('width') else None,
+                    aggregation_type=interval_scorers_lib.IntervalAggregationType(gm.aggregation_type),
+                ))
+            else:
+                raise ValueError(f"Interval scorer não suportado: {which}")
+
         return scorers if scorers else None
 
     def _parse_interval(self, interval_proto):
@@ -439,10 +490,15 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
                 organism = self._parse_organism(request.organism)
                 interval = self._parse_interval(request.interval)
 
-                scores = self.model.score_interval(
-                    interval=interval,
-                    organism=organism
-                )
+                kwargs = {
+                    "interval": interval,
+                    "organism": organism,
+                }
+                interval_scorers = self._parse_interval_scorers(request.interval_scorers)
+                if interval_scorers:
+                    kwargs["interval_scorers"] = interval_scorers
+
+                scores = self.model.score_interval(**kwargs)
                 scores = flatten_scores(scores)
 
                 for item in scores:
@@ -475,11 +531,24 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
                 interval = self._parse_interval(request.interval)
                 ism_interval = self._parse_interval(request.ism_interval)
 
-                scores = self.model.score_ism_variants(
-                    interval=interval,
-                    organism=organism,
-                    ism_interval=ism_interval
-                )
+                kwargs = {
+                    "interval": interval,
+                    "organism": organism,
+                    "ism_interval": ism_interval,
+                }
+                if request.HasField('interval_variant'):
+                    iv = request.interval_variant
+                    kwargs["interval_variant"] = genome.Variant(
+                        chromosome=iv.chromosome,
+                        position=iv.position,
+                        reference_bases=iv.reference_bases,
+                        alternate_bases=iv.alternate_bases,
+                    )
+                variant_scorers = self._parse_variant_scorers(request.variant_scorers)
+                if variant_scorers:
+                    kwargs["variant_scorers"] = variant_scorers
+
+                scores = self.model.score_ism_variants(**kwargs)
                 scores = flatten_scores(scores)
 
                 for item in scores:
