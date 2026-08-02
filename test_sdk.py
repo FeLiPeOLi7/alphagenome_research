@@ -2,7 +2,7 @@ import numpy as np
 from alphagenome_dgx import AlphaGenomeDGX
 
 # 1. Conecta ao servidor local (ou futuramente via IP da DGX)
-client = AlphaGenomeDGX(host="localhost", port=50051)
+client = AlphaGenomeDGX(host="10.9.8.193", port=50051)
 
 # 2. Faz a predição com apenas 1 chamada limpa
 print("Enviando requisição simples via SDK...")

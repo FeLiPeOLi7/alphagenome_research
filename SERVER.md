@@ -21,7 +21,11 @@ Esse projeto inclui arquivos que permitem rodar o servidor do AlphaGenome localm
 Para rodar o servidor, primeiro ative o ambiente virtual (como descrito no README.md):
 
 ```bash
+conda create -n alphagenome python=3.11 -y
+
 conda activate alphagenome
+
+pip install -e .
 
 python3 server.py
 
