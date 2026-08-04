@@ -30,7 +30,7 @@ pip install -e .
 python3 server.py
 
 # Em outro terminal, rode seu cliente. Ou, rode algum teste, como test_sdk
-python3 test_sdk.py
+python3 tests/test_sdk.py
 ```
 
 
