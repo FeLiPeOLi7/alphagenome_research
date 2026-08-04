@@ -1,5 +1,6 @@
 ## Construção de um Servidor para rodar o AlphaGenome
 
+```text
   ┌─────────────────────────────────┐
   │      Cliente (SDK Python)       │
   │     `alphagenome_dgx.py`        │
@@ -15,6 +16,7 @@
   ┌─────────────────────────────────┐
   │   NVIDIA GPU / AlphaGenome SDK  │
   └─────────────────────────────────┘
+```
 
 Esse projeto inclui arquivos que permitem rodar o servidor do AlphaGenome localmente (ex: `server.py`).
 
