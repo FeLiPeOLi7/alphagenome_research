@@ -1,5 +1,6 @@
 ## Construção de um Servidor para rodar o AlphaGenome
 
+```text
   ┌─────────────────────────────────┐
   │      Cliente (SDK Python)       │
   │     `alphagenome_dgx.py`        │
@@ -15,10 +16,11 @@
   ┌─────────────────────────────────┐
   │   NVIDIA GPU / AlphaGenome SDK  │
   └─────────────────────────────────┘
+```
 
-Esse projeto inclui arquivos que permitem rodar o servidor do AlphaGenome localmente (ex: server.py)
+Esse projeto inclui arquivos que permitem rodar o servidor do AlphaGenome localmente (ex: `server.py`).
 
-Para rodar o servidor, primeiro ative o ambiente virtual (como descrito no README.md):
+Para rodar o servidor, primeiro ative o ambiente virtual (como descrito no `README.md`):
 
 ```bash
 conda create -n alphagenome python=3.11 -y
@@ -30,7 +32,5 @@ pip install -e .
 python3 server.py
 
 # Em outro terminal, rode seu cliente. Ou, rode algum teste, como test_sdk
-python3 test_sdk.py
+python3 tests/test_sdk.py
 ```
-
-
