@@ -2,19 +2,24 @@ from concurrent import futures
 import os
 import grpc
 import numpy as np
+import anndata
 
 # Configurações de ambiente
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 MAX_MESSAGE_LENGTH = 100 * 1024 * 1024  # 100 MB
 
+from alphagenome import tensor_utils
 from alphagenome.data import genome
+from alphagenome.data import track_data
 from alphagenome.models import dna_output
 from alphagenome.models import interval_scorers as interval_scorers_lib
+from alphagenome.models import track_data_utils
 from alphagenome.models import variant_scorers as variant_scorers_lib
 from alphagenome_research.model import dna_model
 from alphagenome.protos import dna_model_service_pb2_grpc
 from alphagenome.protos import dna_model_service_pb2
 from alphagenome.protos import dna_model_pb2
+from alphagenome.protos import tensor_pb2
 from alphagenome.data.genome import Interval
 
 def extract_numpy_array(obj):
@@ -80,6 +85,7 @@ def fill_tensor_chunk_proto(tensor_chunk_proto, arr):
     arr_np = np.asarray(arr, dtype=np.float32)
     tensor_chunk_proto.shape.clear()
     tensor_chunk_proto.shape.extend(arr_np.shape)
+    tensor_chunk_proto.data_type = tensor_pb2.DataType.DATA_TYPE_FLOAT32
     tensor_chunk_proto.array.data = arr_np.tobytes()
 
 
@@ -156,7 +162,15 @@ def populate_output_proto(output_proto, model_output, interval_proto=None, outpu
             if track_obj is not None:
                 has_track_attr = True
                 output_proto.output_type = output_enum
-                fill_track_data_proto(output_proto.track_data, track_obj, interval_proto)
+                if isinstance(track_obj, track_data.TrackData):
+                    try:
+                        track_data_proto, _ = track_data_utils.to_protos(track_obj)
+                        output_proto.track_data.CopyFrom(track_data_proto)
+                    except Exception as e:
+                        print(f"[gRPC] Aviso: falha ao serializar TrackData ({e}); usando fallback manual")
+                        fill_track_data_proto(output_proto.track_data, track_obj, interval_proto)
+                else:
+                    fill_track_data_proto(output_proto.track_data, track_obj, interval_proto)
                 break
 
     if has_track_attr:
@@ -192,6 +206,63 @@ def flatten_scores(scores):
     elif scores is not None:
         flat.append(scores)
     return flat
+
+
+def score_anndata_to_variant_response(score, variant=None):
+    """Serializa um AnnData de score de variante para o proto ScoreVariantResponse.
+
+    Segue o mesmo formato usado pelo cliente oficial (dna_client_test.py
+    _generate_variant_scoring_protos): values = X (com quantiles se houver),
+    variant = uns['variant'], track_metadata = var, gene_metadata = obs.
+    """
+    response = dna_model_service_pb2.ScoreVariantResponse()
+
+    track_metadata_protos = [
+        dna_model_pb2.TrackMetadata(
+            name=name,
+            strand=genome.Strand.from_str(strand).to_proto(),
+        )
+        for name, strand in score.var[['name', 'strand']].values
+    ]
+
+    gene_metadata_protos = []
+    if score.obs is not None and 'gene_id' in score.obs:
+        for _, row in score.obs.iterrows():
+            strand_proto = None
+            if (strand := row.get('strand')) is not None:
+                strand_proto = genome.Strand.from_str(strand).to_proto()
+            gene_metadata_protos.append(
+                dna_model_pb2.GeneScorerMetadata(
+                    gene_id=row['gene_id'],
+                    strand=strand_proto,
+                    name=row.get('gene_name'),
+                    type=row.get('gene_type'),
+                    junction_start=row.get('junction_Start'),
+                    junction_end=row.get('junction_End'),
+                )
+            )
+
+    if 'quantiles' in score.layers:
+        score_tensor = np.stack([score.X, score.layers['quantiles']])
+    else:
+        score_tensor = score.X[np.newaxis]
+    tensor_proto, chunks = tensor_utils.pack_tensor(score_tensor, bytes_per_chunk=0)
+    if chunks:
+        raise ValueError("bytes_per_chunk=0 deve gerar 0 chunks")
+
+    variant_proto = None
+    uns_variant = score.uns.get('variant') if score.uns else None
+    if uns_variant is None:
+        uns_variant = variant
+    if uns_variant is not None:
+        variant_proto = uns_variant.to_proto()
+
+    response.output.variant_data.values.CopyFrom(tensor_proto)
+    if variant_proto is not None:
+        response.output.variant_data.metadata.variant.CopyFrom(variant_proto)
+    response.output.variant_data.metadata.track_metadata.extend(track_metadata_protos)
+    response.output.variant_data.metadata.gene_metadata.extend(gene_metadata_protos)
+    return response
 
 
 class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
@@ -467,6 +538,11 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
             for item in scores:
                 response = dna_model_service_pb2.ScoreVariantResponse()
                 
+                if isinstance(item, anndata.AnnData):
+                    response = score_anndata_to_variant_response(item, variant)
+                    yield response
+                    continue
+
                 item_to_proto = getattr(item, 'to_proto', None)
                 proto_obj = None
                 if callable(item_to_proto):
@@ -594,9 +670,22 @@ def serve():
     
     # Escuta em todas as interfaces de rede da DGX (0.0.0.0)
     port = "50051"
-    server.add_insecure_port(f"0.0.0.0:{port}")
+    cert_path = os.environ.get("ALPHAGENOME_TLS_CERT", "certs/server.crt")
+    key_path = os.environ.get("ALPHAGENOME_TLS_KEY", "certs/server.key")
+    if os.path.exists(cert_path) and os.path.exists(key_path):
+        with open(key_path, "rb") as f:
+            private_key = f.read()
+        with open(cert_path, "rb") as f:
+            certificate_chain = f.read()
+        credentials = grpc.ssl_server_credentials(
+            ((private_key, certificate_chain),)
+        )
+        server.add_secure_port(f"0.0.0.0:{port}", credentials)
+        print(f"\nServidor AlphaGenome DGX ativo e escutando em 0.0.0.0:{port} (TLS)")
+    else:
+        server.add_insecure_port(f"0.0.0.0:{port}")
+        print(f"\nServidor AlphaGenome DGX ativo e escutando em 0.0.0.0:{port} (sem TLS)")
     server.start()
-    print(f"\nServidor AlphaGenome DGX ativo e escutando em 0.0.0.0:{port}")
     server.wait_for_termination()
 
 
