@@ -10,9 +10,11 @@ MAX_MESSAGE_LENGTH = 100 * 1024 * 1024  # 100 MB
 
 from alphagenome import tensor_utils
 from alphagenome.data import genome
+from alphagenome.data import junction_data
 from alphagenome.data import track_data
 from alphagenome.models import dna_output
 from alphagenome.models import interval_scorers as interval_scorers_lib
+from alphagenome.models import junction_data_utils
 from alphagenome.models import track_data_utils
 from alphagenome.models import variant_scorers as variant_scorers_lib
 from alphagenome_research.model import dna_model
@@ -141,19 +143,7 @@ def populate_output_proto(output_proto, model_output, interval_proto=None, outpu
         return
 
     # 1. Mapeamento dos tipos de saída suportados para tracks de predição direta
-    track_mapping = [
-        ('rna_seq', dna_model_pb2.OUTPUT_TYPE_RNA_SEQ),
-        ('cage', dna_model_pb2.OUTPUT_TYPE_CAGE),
-        ('atac', dna_model_pb2.OUTPUT_TYPE_ATAC),
-        ('dnase', dna_model_pb2.OUTPUT_TYPE_DNASE),
-        ('chip_tf', dna_model_pb2.OUTPUT_TYPE_CHIP_TF),
-        ('chip_histone', dna_model_pb2.OUTPUT_TYPE_CHIP_HISTONE),
-        ('splice_sites', dna_model_pb2.OUTPUT_TYPE_SPLICE_SITES),
-        ('splice_site_usage', dna_model_pb2.OUTPUT_TYPE_SPLICE_SITE_USAGE),
-        ('splice_junctions', dna_model_pb2.OUTPUT_TYPE_SPLICE_JUNCTIONS),
-        ('contact_maps', dna_model_pb2.OUTPUT_TYPE_CONTACT_MAPS),
-        ('procap', dna_model_pb2.OUTPUT_TYPE_PROCAP),
-    ]
+    track_mapping = TRACK_MAPPING
 
     has_track_attr = False
     for attr_name, output_enum in track_mapping:
@@ -195,6 +185,55 @@ def populate_output_proto(output_proto, model_output, interval_proto=None, outpu
             fill_data_proto(output_proto.variant_data, arr, interval_proto)
         elif 'track_data' in valid_fields:
             fill_data_proto(output_proto.track_data, arr, interval_proto)
+
+
+TRACK_MAPPING = [
+    ('rna_seq', dna_model_pb2.OUTPUT_TYPE_RNA_SEQ),
+    ('cage', dna_model_pb2.OUTPUT_TYPE_CAGE),
+    ('atac', dna_model_pb2.OUTPUT_TYPE_ATAC),
+    ('dnase', dna_model_pb2.OUTPUT_TYPE_DNASE),
+    ('chip_tf', dna_model_pb2.OUTPUT_TYPE_CHIP_TF),
+    ('chip_histone', dna_model_pb2.OUTPUT_TYPE_CHIP_HISTONE),
+    ('splice_sites', dna_model_pb2.OUTPUT_TYPE_SPLICE_SITES),
+    ('splice_site_usage', dna_model_pb2.OUTPUT_TYPE_SPLICE_SITE_USAGE),
+    ('splice_junctions', dna_model_pb2.OUTPUT_TYPE_SPLICE_JUNCTIONS),
+    ('contact_maps', dna_model_pb2.OUTPUT_TYPE_CONTACT_MAPS),
+    ('procap', dna_model_pb2.OUTPUT_TYPE_PROCAP),
+]
+
+
+def iter_track_outputs(model_output, interval_proto=None):
+    """Gera um proto Output por track disponível no modelo.
+
+    O proto Output só comporta um track_data por mensagem e o cliente oficial
+    acumula as tracks lendo uma resposta por output_type. Por isso cada track
+    presente precisa ser enviada em uma resposta separada (o comportamento
+    antigo de enviar só a primeira track derrubava os demais outputs pedidos,
+    ex.: RNA_SEQ + DNASE retornava apenas RNA_SEQ).
+    """
+    for attr_name, output_enum in TRACK_MAPPING:
+        track_obj = getattr(model_output, attr_name, None)
+        if track_obj is None:
+            continue
+        output_proto = dna_model_pb2.Output()
+        output_proto.output_type = output_enum
+        if isinstance(track_obj, junction_data.JunctionData):
+            junction_proto, chunks = junction_data_utils.to_protos(
+                track_obj, bytes_per_chunk=0
+            )
+            if chunks:
+                raise ValueError("bytes_per_chunk=0 deve gerar 0 chunks")
+            output_proto.junction_data.CopyFrom(junction_proto)
+        elif isinstance(track_obj, track_data.TrackData):
+            try:
+                track_data_proto, _ = track_data_utils.to_protos(track_obj)
+                output_proto.track_data.CopyFrom(track_data_proto)
+            except Exception as e:
+                print(f"[gRPC] Aviso: falha ao serializar TrackData ({e}); usando fallback manual")
+                fill_track_data_proto(output_proto.track_data, track_obj, interval_proto)
+        else:
+            fill_track_data_proto(output_proto.track_data, track_obj, interval_proto)
+        yield output_proto
 
 
 def flatten_scores(scores):
@@ -262,6 +301,64 @@ def score_anndata_to_variant_response(score, variant=None):
         response.output.variant_data.metadata.variant.CopyFrom(variant_proto)
     response.output.variant_data.metadata.track_metadata.extend(track_metadata_protos)
     response.output.variant_data.metadata.gene_metadata.extend(gene_metadata_protos)
+    return response
+
+
+def score_anndata_to_interval_response(score, interval=None):
+    """Serializa um AnnData de score de intervalo para o proto ScoreIntervalResponse.
+
+    Segue o mesmo formato usado pelo cliente oficial (dna_client.py
+    _make_interval_output / _construct_score_interval): values = X (com
+    quantiles se houver), interval = uns['interval'], track_metadata = var,
+    gene_metadata = obs.
+    """
+    response = dna_model_service_pb2.ScoreIntervalResponse()
+
+    track_metadata_protos = [
+        dna_model_pb2.TrackMetadata(
+            name=name,
+            strand=genome.Strand.from_str(strand).to_proto(),
+        )
+        for name, strand in score.var[['name', 'strand']].values
+    ]
+
+    gene_metadata_protos = []
+    if score.obs is not None and 'gene_id' in score.obs:
+        for _, row in score.obs.iterrows():
+            strand_proto = None
+            if (strand := row.get('strand')) is not None:
+                strand_proto = genome.Strand.from_str(strand).to_proto()
+            gene_metadata_protos.append(
+                dna_model_pb2.GeneScorerMetadata(
+                    gene_id=row['gene_id'],
+                    strand=strand_proto,
+                    name=row.get('gene_name'),
+                    type=row.get('gene_type'),
+                    junction_start=row.get('junction_Start'),
+                    junction_end=row.get('junction_End'),
+                )
+            )
+
+    if 'quantiles' in score.layers:
+        score_tensor = np.stack([score.X, score.layers['quantiles']])
+    else:
+        score_tensor = score.X[np.newaxis]
+    tensor_proto, chunks = tensor_utils.pack_tensor(score_tensor, bytes_per_chunk=0)
+    if chunks:
+        raise ValueError("bytes_per_chunk=0 deve gerar 0 chunks")
+
+    interval_proto = None
+    uns_interval = score.uns.get('interval') if score.uns else None
+    if uns_interval is None:
+        uns_interval = interval
+    if uns_interval is not None:
+        interval_proto = uns_interval.to_proto()
+
+    response.output.interval_data.values.CopyFrom(tensor_proto)
+    if interval_proto is not None:
+        response.output.interval_data.metadata.interval.CopyFrom(interval_proto)
+    response.output.interval_data.metadata.track_metadata.extend(track_metadata_protos)
+    response.output.interval_data.metadata.gene_metadata.extend(gene_metadata_protos)
     return response
 
 
@@ -427,20 +524,24 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
             # 2. Preenche Referência dinamicamente (is not None resolve a armadilha do truthiness)
             # NOTA: reference_output e alternate_output pertencem ao mesmo 'oneof payload' no proto,
             # entao precisam ser enviados em respostas separadas (o segundo apagaria o primeiro).
+            # Cada track tambem vai em uma resposta separada (o proto Output so
+            # comporta um track_data por mensagem; o cliente acumula por output_type).
             if ref_data is not None:
                 try:
-                    ref_response = dna_model_service_pb2.PredictVariantResponse()
-                    populate_output_proto(ref_response.reference_output, ref_data, interval, output_category="variant")
-                    yield ref_response
+                    for out_proto in iter_track_outputs(ref_data, interval):
+                        ref_response = dna_model_service_pb2.PredictVariantResponse()
+                        ref_response.reference_output.CopyFrom(out_proto)
+                        yield ref_response
                 except Exception as e:
                     print(f"\n[gRPC ERRO FATAL] Falha interna no populate_output_proto (Referência): {e}")
 
             # 3. Preenche Alternativa dinamicamente
             if alt_data is not None:
                 try:
-                    alt_response = dna_model_service_pb2.PredictVariantResponse()
-                    populate_output_proto(alt_response.alternate_output, alt_data, interval, output_category="variant")
-                    yield alt_response
+                    for out_proto in iter_track_outputs(alt_data, interval):
+                        alt_response = dna_model_service_pb2.PredictVariantResponse()
+                        alt_response.alternate_output.CopyFrom(out_proto)
+                        yield alt_response
                 except Exception as e:
                     print(f"\n[gRPC ERRO FATAL] Falha interna no populate_output_proto (Alternativa): {e}")
 
@@ -473,10 +574,10 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
                 requested_outputs=requested_outputs,
             )
 
-            response = dna_model_service_pb2.PredictIntervalResponse()
-
-            populate_output_proto(response.output, output, request.interval)
-            yield response
+            for out_proto in iter_track_outputs(output, request.interval):
+                response = dna_model_service_pb2.PredictIntervalResponse()
+                response.output.CopyFrom(out_proto)
+                yield response
 
     def PredictSequence(self, request_iterator, context):
         print("\n[gRPC] Nova requisição PredictSequence recebida...")
@@ -501,10 +602,10 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
                 requested_outputs=requested_outputs,
             )
 
-            response = dna_model_service_pb2.PredictSequenceResponse()
-
-            populate_output_proto(response.output, output, interval_proto=None)
-            yield response
+            for out_proto in iter_track_outputs(output, interval_proto=None):
+                response = dna_model_service_pb2.PredictSequenceResponse()
+                response.output.CopyFrom(out_proto)
+                yield response
 
     def ScoreVariant(self, request_iterator, context):
         print("\n[gRPC] Nova requisição ScoreVariant recebida...")
@@ -579,6 +680,12 @@ class AlphaGenomeServer(dna_model_service_pb2_grpc.DnaModelServiceServicer):
 
                 for item in scores:
                     response = dna_model_service_pb2.ScoreIntervalResponse()
+
+                    if isinstance(item, anndata.AnnData):
+                        response = score_anndata_to_interval_response(item, interval)
+                        yield response
+                        continue
+
                     item_to_proto = getattr(item, 'to_proto', None)
                     proto_obj = None
                     if callable(item_to_proto):
